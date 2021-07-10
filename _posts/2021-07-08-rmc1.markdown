@@ -1,0 +1,144 @@
+---
+layout: post
+title:  "Rank-metric codes, Part I: Basic properties"
+date:   2021-07-08 
+categories: codes
+tags: [codes]
+image: 
+---
+{% include mathjax.html %}
+
+> _**Disclaimer:** this is not final. If you find mistakes, please report them._
+
+**This post is part of a series on rank-metric codes**:
+
+- [**Part I: Basic definitions**]({% post_url 2021-07-08-rmc1 %}) 
+- [Part II: Constructing Gabidulin codes]({% post_url 2021-07-08-rmc2 %}) 
+- Part III: Decoding Gabiduling codes
+- Part IV: Application to random network linear coding
+
+
+In the classical theory of error-correcting codes, errors are measured in terms of their [Hamming distance][wphamming] to codewords, $$d_H$$. However this is not the only possible choice of distance, and authors have investigated several alternatives. In this post, we explore the **rank metric**.
+
+Our goal in the end is (once the basic definitions and motivations are laid out) to write an encoder and a decoder for the Delsarte-Gabidulin MRD codes. One application and source of motivation for studying such codes, which comes back to papers by Kötter and Kschischang in 2008, is [random network coding][wpcoding] about which we'll say a few words.
+
+# I. What is the rank metric? 
+
+Given a matrix $$M$$, its [rank][wprank] is the number of linearly independent columns (or, equivalently, rows). We write it $$\mathrm{rk}M$$.
+
+If we now consider a [vector space][wpvecspace] of matrices $$\mathcal M$$, then we can define between any two matrices $$x$$ and $$y$$ in $$\mathcal M$$ the quantity
+
+$$d_G(x, y) := \mathrm{rk}(x - y)$$
+
+Evidently, this is a symmetric function, and only a zero matrix has rank zero. Less obvious is
+
+> **Exercise 1:** show that $$d_G$$ satisfies the [triangle identity][wptriangle]: for all $$x, y, z \in \mathcal M$$, it holds that $$d_G(x, z) \leq d_G(x, y) + d_G(y, z)$$.
+
+These three properties mean that $$d_G$$ is a honest-to-goodness [metric][wpmetric] and we will therefore call it the **rank metric**.
+
+This allows us to define the objects that we'll be interested in: classical linear codes are vector spaces whose vectors are separated by at least a given Hamming distance; well linear **rank-metric codes** are vector spaces (of matrices, we'll come to that in a minute) whose vectors are separated by at least a given rank distance, called the code's **minimal (rank) distance**, $$d_r$$.
+
+> **Note on history**: the idea of studying the rank metric seems to have originated in several minds independently; undoubtedly Delsarte was the first to prove important properties in 1978, and who saw rank-metric codes as [$$q$$-analogues][wpqanalog]. They were rediscovered by Gabidulin in 1985 in the completely different context of [array error correction][wpstc], and again by Roth in 1991. (Some Chinese authors even claim a prior idea of Hua, which I cannot confidently verify). There has been some interest in rank-metric codes in cryptography, although they do not seem well-suited for such applications.
+
+There are still many open questions in the theory of rank-metric codes. Our angle for this post series is, following Gabidulin, the construction of an "optimal" (MRD, see below) code with given parameters. 
+
+# II. Building the (matrix) vector space
+
+As we mentioned, our codewords will be matrices. Here is how this works out.
+Let $$q$$ be a prime power and $$\mathbb F_q$$ be a finite field. For any $$m \geq 1$$, the field $$\mathbb F_{q^m}$$ has the a natural structure of an $$m$$-dimensional vector space on $$\mathbb F_q$$: by convention, we'll write an element of $$\mathbb F_{q^m}$$ as a _column vector_ of size $m$.
+
+Therefore, a word of size $$n$$ in $$\mathbb F_{q^m}$$ is an $$m \times n$$ matrix with entries in $$\mathbb F_q$$.
+
+> **Example:** let $$\mathbb F_{2^2} = \{0, 1, \alpha, \overline{\alpha}\}$$, the word $$w = 010\alpha \in \mathbb F_{2^2}^{4}$$ can be written as $$w = \left(\begin{smallmatrix}0 & 1 & 0 & 0\\ 0 & 0 & 0 & 1\end{smallmatrix}\right)$$.
+
+When $$m=1$$, the rank metric becomes identical to the Hamming metric. In general however, the following holds:
+
+> **Exercise:** show that for any $$x, y \in \mathbb F_{q^m}^n$$, we have $$d_G(x, y) \leq d_H(x, y)$$.
+
+# III. Singleton-Delsarte bound, Anticode bound 
+
+The rank of a matrix cannot exceed the smallest of the matrix's dimensions. If $$C$$ is a linear rank-metric code of parameters $$[n, k, d_r]$$ -- that is to say, a $$k$$-dimensional vector subspace of $$\mathbb F_{q^m}^n$$ in which any two distinct elements at at rank distance at least $$d_r$$ of each other -- then Delsarte showed the following inequality (called the **Delsarte-Singleton inequality**):
+
+$$\begin{cases}k+d_r \leq n+1 & \text{if $n \leq m$,}\\km + d_rn \leq (m+1)n & \text{otherwise.}\end{cases}$$
+
+> **Exercise:** show the above inequality.
+
+Codes that attain the bound are called **maximum rank distance**, or in short **MRD codes**. There exist MRD codes for all $$m, n, d_r$$, we'll actually build one in the next part of this series.
+
+> **Exercise:** show that there do not exist perfect linear codes for the rank metric.
+
+As a consequence of the above (which applies even more broadly to non-linear rank-metric codes), the "best" we can hope for is rank metric codes that are MRD.
+
+A rather harder result, which was initially found by Meshulam, is known as the **anticode inequality**:
+
+$$k \leq \max(n, m) \cdot \max_{c \in C} \operatorname{rk}c$$
+
+A code attaining this bound is called **optimal anticode**. These are not difficult to obtain, in fact here is one such code: the subset of $$\mathbb F_{q^m}^n$$ made of matrices whose last $$n-k$$ rows are zero -- this is a code of dimension $$mk$$ with all codewords of rank $$k$$. In a sense, this is the polar opposite of MRD codes. 
+
+# IV. New codes from old ones
+
+As is typical in code theory, there are transformations that turn a given linear code into some related code with different parameters. This flexibility is interesting in practice, as it is one way to find codes matchings our needs, but these operations are of course of theoretical interest too.
+
+#### IV.1. Dual codes
+
+One such transformation is _duality_, which is defined in terms of a [inner product][wpinnerprod]. We have a choice of which inner product to use:
+
+- The "Euclidean" product $$\langle x, y \rangle := \sum_{i=1}^n x_iy_i$$, which yields the **(standard) dual**;
+- The [symplectic product][wpsymp] $$(x, y) := \sum_{i=1}^n x_i \overline{y_i}$$, where $$\overline y$$ is the [conjugate][wpconjugate] of $$y$$ and the product is the field product, which gives the **symplectic dual**;
+- The matrix inner product $$[x, y] := \operatorname{tr}(xy^\top)$$ where $$y^\top$$ is the matrix [transpose][wptranspose] of $$y$$ and the product is the matrix product, which gives the **Delsarte dual**.
+
+The [**dual** code][wpdual] of $$C$$ is the subset $$C^\bot$$ of $$\mathbb F_{q^m}$$ whose elements are all orthogonal (i.e., of inner product 0) with all the elements in $$C$$. A direct consequence is that:
+
+$$\dim C + \dim C^\bot = mn$$
+
+> **Exercice:** show that for either notion of dual, $$C^{\bot\bot} = C$$.
+
+> **Exercise:** show that if $$C$$ is an MRD code with parameters $$[n, k, d_r]$$ then its Delsarte dual is an MRD code and give its parameters.
+
+Similarly, the Delsarte dual of an optimal anticode is optimal anticode.
+
+> **Exercise:** combining the Delsarte-Singleton and anticode bounds, show that $$d_r < \max_{c \in C^\bot}\operatorname{rk}c$$.
+
+
+#### IV.2. Adjoint code
+
+There is also, owing to the matrix form of our elements, an additional transformation that yields a code: the **adjoint code** $$C^\top$$ is the code of $$\mathbb F_{q^n}^m$$ obtained by transposing each codeword of $$C$$. Obviously, $$C^{\top\top} = C$$, and a code is MRD if and only if its adjoint is MRD.
+
+#### IV.3. Puncturing, shortening, and their duality
+
+Let us fix $$i$$ between $$1$$ and $$n$$,
+
+- The **[punctured][wppuncture] code** $$\mathcal P C$$ is the code obtained by deleting the $$i$$-th coordinate ;
+- The **shortened code** $$\mathcal S C$$ is the code obtained by deleting the $$i$$-th coordinate of each element in $$C$$ whose $$i$$-th column is zero.
+
+The following properties hold:
+
+- $$\mathcal PC$$ is $$[n-1, k, d_r']$$, with $$d_r' \leq d_r - 1$$
+- $$\mathcal SC$$ is $$[n-1, k', d_r'']$$, with $$k' \geq k-m$$ and $$d_r'' \geq d_r$$;
+- If $$C$$ is MRD then so are $$\mathcal PC$$ and $$\mathcal SC$$
+- The following duality theorem: $$(\mathcal PC)^\bot = \mathcal S(C^\bot)$$, where we consider the Delsarte dual.
+
+# Next episode: Building an MRD code
+
+In the [next part of this series]({% post_url 2021-07-08-rmc2 %}), we will construct a family of MRD codes and implement an encoder in SageMath. Stay tuned! 
+
+_Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
+
+
+
+[wphamming]: https://en.wikipedia.org/wiki/Hamming_distance
+[wprank]: https://en.wikipedia.org/wiki/Rank_(linear_algebra)
+[wpvecspace]: https://en.wikipedia.org/wiki/Vector_space
+[wptriangle]: https://en.wikipedia.org/wiki/Triangle_inequality
+[wpmetric]: https://en.wikipedia.org/wiki/Metric_(mathematics)
+[wpdual]: https://en.wikipedia.org/wiki/Dual_code
+[wpinnerprod]: https://en.wikipedia.org/wiki/Inner_product_space
+[wpsymp]: https://en.wikipedia.org/wiki/Symplectic_vector_space
+[wpfieldtrace]: https://en.wikipedia.org/wiki/Field_trace
+[wpconjugate]: https://en.wikipedia.org/wiki/Conjugate_element_(field_theory)
+[wptranspose]: https://en.wikipedia.org/wiki/Transpose
+[wpqanalog]: https://en.wikipedia.org/wiki/Q-analog
+[wppuncture]: https://en.wikipedia.org/wiki/Puncturing
+[wpstc]: https://en.wikipedia.org/wiki/Space%E2%80%93time_code
+[wpcoding]: https://en.wikipedia.org/wiki/Linear_network_coding
+[coffee]: https://www.buymeacoffee.com/shargs

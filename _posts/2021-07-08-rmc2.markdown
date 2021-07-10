@@ -1,0 +1,204 @@
+---
+layout: post
+title:  "Rank-metric codes, Part II: Constructing Gabidulin codes"
+date:   2021-07-08 
+categories: codes
+tags: [codes]
+image: 
+---
+{% include mathjax.html %}
+
+> _**Disclaimer:** this is not final. If you find mistakes, please report them._
+
+**This post is part of a series on rank-metric codes**:
+
+- [Part I: Basic definitions]({% post_url 2021-07-08-rmc1 %}) 
+- [**Part II: Constructing Gabidulin codes**]({% post_url 2021-07-08-rmc2 %}) 
+- Part III: Decoding Gabiduling codes
+- Part IV: Application to random network linear coding
+
+In this post, we'll discuss the background behind Gabidulin codes, which are an important family of rank metric codes, and design a simple encoder. Throughout this post, $$q$$ is a prime power.
+
+# I. Linearised polynomials
+
+The [Frobenius morphism][wpfrob] over $$\mathbb F_q$$ is the map $$\pi_q: x \mapsto x^q$$. Given any polynomial
+
+$$P(X) = p_0 + p_1X + p_2 X^2 + \cdots + p_r X^r \in \mathbb F_{q^m}[X],$$
+
+we define its [**linearised $$q$$-associate**][wplinpol] as
+
+$$\widehat P(X) := (P \circ \pi_q)(X) = p_0 + p_1 X^{q} + p_2 X^{q^2} + \cdots + p_r X^{q^r}.$$
+
+It is somewhat conventional to use the notation $$[j] = q^j$$, so that we have
+
+$$P(X) = \sum_{i=0}^r p_i X^i \qquad \text{and} \qquad \widehat P(X) = \sum_{i=0}^r p_i X^{[i]}.$$
+
+The name "linearised" comes from the following property
+
+> **Exercise:** show that for any $$a, b \in \mathbb F_{q^m}$$ and any $$x, y \in \mathbb F_q$$, $$\widehat P(ax + by) = a \widehat P(x) + b \widehat P(y)$$.
+
+Linearised polynomials (or "$$q$$-polynomials") have many remarkable properties; they were initially introduced by Ore in 1933. In particular, they form a (non-commutative) ring where addition is standard polynomial addition and "multiplication" is composition.
+
+# II. Gabidulin codes as evaluation codes
+
+Let $$g = \{g_1, g_2, \dotsc, g_n\}$$ be a set of elements in $$\mathbb F_{q^m}$$ which are linearly independent over $$\mathbb F_q$$. The application $$\operatorname{ev}_g$$ defined on the set of polynomials of degree at most $$k$$ by
+
+$$\operatorname{ev}_g:= P \mapsto \{P(g_1), P(g_2), \dotsc, P(g_n)\} \in\mathbb F_{q^m}^n$$
+
+is linear, and therefore defines a linear code: the well-known [Reed-Solomon code][wprs]. This code is MDS, meaning that (in the Hamming metric) it attains the [Singleton bound][wpsingleton].
+
+**Gabidulin codes**, introduced in 1985, closely parallel this construction: they are defined through the application $$\widehat{\operatorname{ev}}_g$$ defined on the set of polynomials of degree at most $$k$$ by
+
+$$\widehat{\operatorname{ev}}_g:= P \mapsto \operatorname{ev}_g(\widehat P).$$
+
+In other terms, we evaluate $$\widehat P$$ instead of $$P$$. In the rank metric, Gabidulin codes attain the Delsarte-Singleton bound (see Part I) and are therefore MRD. 
+
+> **Exercise:** prove this.
+
+Until fairly recently (2015) Gabidulin codes were the _only_ known MRD codes. They still are (to the best of my knowledge) the only known _linear_ MRD codes. As evaluation codes they are not [systematic][wpsyst], but being linear codes there always exist an equivalent systematic form.
+
+# III. Writing a Gabidulin encoder
+
+The blueprint for writing an encoder is fairly straightforward:
+
+1. Decide on a set of parameters, i.e, the values of $$q, m, n, k$$. These ultimately determines $$d_r$$ (since the code is MRD) and therefore how many errors our code can handle.
+
+2. Decide on a generating set $$g$$. There are no theoretical constraints for this choice, other than the linear independance condition. However, implementation may be easier for well-chosen values.
+
+3. Given a message $$M$$ to be encoded, represent $$m$$ as a polynomial $$P$$ over $$\mathbb F_{q}$$ of degree at most $$k$$. The obvious approach, which we follow here, consists in writing down $$M$$ in base $$q$$, and use the digits as coefficients for $$P$$. This is most easily achieved when $$q$$ is even.
+
+4. Evaluate $$P$$ over the points of $$g$$ to get the codeword. The codeword can then be serialized for transmission or further processing.
+
+Several improvements on this basic approach can be thought of. Here we keep things simple for expository reasons.
+
+#### III.1. Parameter set
+
+We'll settle on $$q = 2^{8} = 256$$, $$n = m = 8$$ and $$k = 4$$. 
+
+Working in a binary field means easier arithmetic operations and the choice of $$q, m$$ means that each element of $$\mathbb F_{q^m}$$ is a 64-bit integer. Every codeword is a vector of size 512 bit (i.e., 64 bytes), and we can encode 32-bit messages (i.e., 4 bytes). 
+
+We'll need a basis of $$\mathbb F_{q^m}$$ as a $$\mathbb F_q$$-vector space; the (primitive) [normal basis][wpnormbas] will work: let $$\zeta$$ be a primitive element of $$\mathbb F_{q^m}$$, then a basis is given by the set $$\{b_1, \dotsc, b_m \}$$ where
+
+$$b_1 = \zeta, b_2 = \zeta^{[2]}, b_3 = \zeta^{[3]}, \dotsc, b_m = \zeta^{[m]}$$
+
+(we remember from the previous post that $$[j] = q^j$$). This gives the following SageMath code:
+
+```python
+# Code parameters
+q, m, n, k = 2^8, 8, 8, 4
+
+Fq    = GF(q)
+Fqm   = Fq.extension(m)
+zeta  = Fqm.gen()
+basis = [zeta^(q^j) for j in range(m)]
+```
+
+By the Delsarte--Singleton bound we have minimal rank $$d_r= n + 1 - k = 5$$, which gives an error correction capacity of 
+
+$$t = \left\lfloor \frac{d_r - 1}{2} \right\rfloor = 2$$
+
+and an error detection capacity of 4, both in the rank metric.
+
+#### III.2. Generating set
+
+We need to find $$n= 8$$ values $$g_i \in\mathbb F_{q^m}$$, which are $$\mathbb F_q$$-linearly independent: we make here the simplest choice, namely we use for $$g_i$$ the $$\mathbb F_q$$-basis of $$\mathbb F_{q^m}$$ considered above:
+
+$$g_1 = b_1, g_2= b_2, \dotsc, g_n = g_m = b_m.$$
+
+Other choices are of course possible. Observe that with this particular basis, 
+
+$$g_i^{[j]} = b_i^{[j]} = \zeta^{[i][j]} = \zeta^{[i+j]} = \zeta^{[i+j ~ \bmod ~ m]}.$$
+
+Furthermore, since we will be evaluating polynomials of degree at most $$k$$, we only really need $$g_1, \dotsc, g_k$$.
+
+We may want to compute the generating matrix $$G_{i, j} = g_i^{[j]}$$ once and for all: it is an $$8 \times 4$$ matrix of elements in $$\mathbb F_{q^m}$$ -- with our parameters it takes $$8\cdot 4 \cdot 64 = 2048$$ bits, or 256 bytes, to store this matrix. Let's say it's acceptable:
+
+```python
+G = Matrix([[zeta^(q^(i+j)) for j in range(k)] for i in range(n)])
+```
+
+#### III.3. Message representation
+
+We'll assume that our message is given to us as a sequence of $$k$$ bytes $$M_1, M_2, \dotsc, M_{k}$$ (if necessary we can pad with zeros), which is none other than the coefficients of a polynomial in $$\mathbb F_{q}[X]$$ of degree at most $$k$$.  
+
+Thanks to our choice of parameters, there is nothing to do.
+
+In fact, we'll keep $$M$$ as a sequence of bytes (rather than a polynomial) for the next step. The following helper function is just a way to put them in a format SageMath will understand:
+
+```python
+def as_bytes(msg):
+    # Note: msg is a string of length 4, which will be converted to bytes
+    msg_bits = [Fq(ZZ(a).digits(2)) for a in str.encode(msg)]
+```
+
+#### III.4. Polynomial evaluation
+
+Everything is now set up to encode our message: we only need to compute the matrix-vector product
+
+$$C = GM$$
+
+Assuming we get as input a string of length 4, the following function takes care of everything:
+
+```python
+def encode(M):
+    return G * vector(as_bytes(M))
+```
+
+The result is our codeword in $$\mathbb F_{q^m}^n$$.
+
+Let's finish with pretty printing:
+
+```python
+def bits_to_hex(lst):
+    # Converts a list of bits into an integer in hexadecimal notation
+    # Beware that is doesn't add any leading zeros
+    return Integer(''.join(map(str, lst)), base = 2).hex()
+
+def serialize(C):
+    # Converts a codeword into a hexadecimal sequence 
+    return [bits_to_hex(C[i].polynomial().list()) for i in range(m)]
+
+def pretty_print_codeword(C):
+    # Displays a codeword
+    print('\n'.join(serialize(C))) 
+```
+
+# IV. Testing all this! 
+
+
+
+```python
+C = encode("rank")
+pretty_print_codeword(C)
+
+# Expected output: 
+#
+# 3af9749345bd5a39
+# 423edb1e1f49e063
+# 69ab16321e0fb577
+# f14c127453ca2325
+# 59a4ea78485e6619
+# 4f18569caaf8b2c1
+# 745617e50051c9d5
+# 1d03d5a0001c9bfd
+```
+
+There we have it, in a total of 25 SageMath lines (comments, whitespace, and pretty-printing included!) the promised Gabidulin encoder. With minor modifications, the code should work with various choices of parameters and help you get a feeling of the encoding process. We also encourage interested readers to implement an encoder at a lower level, say in Rust or C, where our choices of parameters allow for clever improvements not discussed here.
+
+Unsurprisingly, there is a large expansion factor (16 times) because of our rather arbitrary choice of $$k=4$$ -- which is in theory paid back by the relatively error correction capacity of this code.
+
+# Next time: a Gabidulin decoder
+
+One may wonder why we didn't "just give the generator matrix" right away. Besides the fact that one needs to build this matrix differently for different situations, and the various properties that require some theory to understand, there is really no other way to see that Gabidulin codes are to the rank metric what Reed-Solomon codes are to the Hamming metric. 
+
+But the real, deep reason for this burst of theory is something we'll see in the **next part** (to be written). As is typical in code theory, decoding is the hard part. Erros in the rank metric are also strange beasts, we'll look into that. Stay tuned!
+
+
+_Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
+
+[wpfrob]: https://en.wikipedia.org/wiki/Frobenius_endomorphism
+[wplinpol]: https://en.wikipedia.org/wiki/Linearised_polynomial
+[wprs]: https://en.wikipedia.org/wiki/Reed%E2%80%93Solomon_error_correction
+[wpsingleton]: https://en.wikipedia.org/wiki/Singleton_bound
+[wpsyst]: https://en.wikipedia.org/wiki/Systematic_code
+[wpnormbas]: https://en.wikipedia.org/wiki/Normal_basis
