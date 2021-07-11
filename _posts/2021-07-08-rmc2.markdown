@@ -17,7 +17,7 @@ image:
 - Part III: Decoding Gabiduling codes
 - Part IV: Application to random network linear coding
 
-In this post, we'll discuss the background behind Gabidulin codes, which are an important family of rank metric codes, and design a simple encoder. Throughout this post, $$q$$ is a prime power.
+In this post, we'll discuss the background behind Gabidulin codes, which are an important family of rank metric codes, and design a simple encoder for them in SageMath. Throughout this post, $$q$$ is a prime power.
 
 # I. Linearised polynomials
 
@@ -51,7 +51,7 @@ is linear, and therefore defines a linear code: the well-known [Reed-Solomon cod
 
 $$\widehat{\operatorname{ev}}_g:= P \mapsto \operatorname{ev}_g(\widehat P).$$
 
-In other terms, we evaluate $$\widehat P$$ instead of $$P$$. In the rank metric, Gabidulin codes attain the Delsarte-Singleton bound (see Part I) and are therefore MRD. 
+In other terms, we evaluate $$\widehat P$$ instead of $$P$$. In the rank metric, Gabidulin codes attain the Delsarte-Singleton bound and are therefore MRD (see Part I of this post series). 
 
 > **Exercise:** prove this.
 
@@ -79,7 +79,7 @@ Working in a binary field means easier arithmetic operations and the choice of $
 
 We'll need a basis of $$\mathbb F_{q^m}$$ as a $$\mathbb F_q$$-vector space; the (primitive) [normal basis][wpnormbas] will work: let $$\zeta$$ be a primitive element of $$\mathbb F_{q^m}$$, then a basis is given by the set $$\{b_1, \dotsc, b_m \}$$ where
 
-$$b_1 = \zeta, b_2 = \zeta^{[2]}, b_3 = \zeta^{[3]}, \dotsc, b_m = \zeta^{[m]}$$
+$$b_1 = \zeta, b_2 = \zeta^{[1]}, b_3 = \zeta^{[2]}, \dotsc, b_m = \zeta^{[m - 1]}$$
 
 (we remember from the previous post that $$[j] = q^j$$). This gives the following SageMath code:
 
@@ -106,15 +106,14 @@ We need to find $$n= 8$$ values $$g_i \in\mathbb F_{q^m}$$, which are $$\mathbb 
 $$g_1 = b_1, g_2= b_2, \dotsc, g_n = g_m = b_m.$$
 
 Other choices are of course possible. Observe that with this particular basis, 
-
-$$g_i^{[j]} = b_i^{[j]} = \zeta^{[i][j]} = \zeta^{[i+j]} = \zeta^{[i+j ~ \bmod ~ m]}.$$
+$$g_i^{[j]} = \zeta^{[i+j]}$$, although we won't make use of this fact here.
 
 Furthermore, since we will be evaluating polynomials of degree at most $$k$$, we only really need $$g_1, \dotsc, g_k$$.
 
 We may want to compute the generating matrix $$G_{i, j} = g_i^{[j]}$$ once and for all: it is an $$8 \times 4$$ matrix of elements in $$\mathbb F_{q^m}$$ -- with our parameters it takes $$8\cdot 4 \cdot 64 = 2048$$ bits, or 256 bytes, to store this matrix. Let's say it's acceptable:
 
 ```python
-G = Matrix([[zeta^(q^(i+j)) for j in range(k)] for i in range(n)])
+G = Matrix([[basis[i]^j for j in range(k)] for i in range(n)])
 ```
 
 #### III.3. Message representation
@@ -128,7 +127,7 @@ In fact, we'll keep $$M$$ as a sequence of bytes (rather than a polynomial) for 
 ```python
 def as_bytes(msg):
     # Note: msg is a string of length 4, which will be converted to bytes
-    msg_bits = [Fq(ZZ(a).digits(2)) for a in str.encode(msg)]
+    return [Fq(ZZ(a).digits(2)) for a in str.encode(msg)]
 ```
 
 #### III.4. Polynomial evaluation
@@ -165,8 +164,6 @@ def pretty_print_codeword(C):
 
 # IV. Testing all this! 
 
-
-
 ```python
 C = encode("rank")
 pretty_print_codeword(C)
@@ -183,7 +180,7 @@ pretty_print_codeword(C)
 # 1d03d5a0001c9bfd
 ```
 
-There we have it, in a total of 25 SageMath lines (comments, whitespace, and pretty-printing included!) the promised Gabidulin encoder. With minor modifications, the code should work with various choices of parameters and help you get a feeling of the encoding process. We also encourage interested readers to implement an encoder at a lower level, say in Rust or C, where our choices of parameters allow for clever improvements not discussed here.
+There we have it, in a total of very few SageMath lines (comments, whitespace, and pretty-printing included!) the promised Gabidulin encoder. With minor modifications, the code should work with various choices of parameters and help you get a feeling of the encoding process. We also encourage interested readers to implement an encoder at a lower level, say in Rust or C, where our choices of parameters allow for clever improvements not discussed here.
 
 Unsurprisingly, there is a large expansion factor (16 times) because of our rather arbitrary choice of $$k=4$$ -- which is in theory paid back by the relatively error correction capacity of this code.
 
@@ -202,3 +199,4 @@ _Did you like this? Do you want to support this kind of stuff? Please share arou
 [wpsingleton]: https://en.wikipedia.org/wiki/Singleton_bound
 [wpsyst]: https://en.wikipedia.org/wiki/Systematic_code
 [wpnormbas]: https://en.wikipedia.org/wiki/Normal_basis
+[coffee]: https://www.buymeacoffee.com/shargs
