@@ -1,0 +1,297 @@
+---
+layout: post
+title:  "Rank-metric codes, Part III: Decoding Gabidulin codes"
+date:   2021-07-11
+categories: codes
+tags: [codes]
+image: 
+---
+{% include mathjax.html %}
+
+> _**Disclaimer:** this is not final. If you find mistakes, please report them._
+
+**This post is part of a series on rank-metric codes**:
+
+- [Part I: Basic definitions]({% post_url 2021-07-08-rmc1 %})
+- [Part II: Constructing Gabidulin codes]({% post_url 2021-07-08-rmc2 %})
+- [**Part III: Decoding Gabiduling codes**]({% post_url 2021-07-11-rmc3 %})
+- Part IV: Application to random network linear coding
+
+We have now designed a simple encoder for Gabidulin codes (part 2) which are in a sense optimal codes in the rank metric (part 1). What remains to do is to decode them, which is as usual the hard part.
+
+# I. Errors in the rank metric
+
+Assume we're receiving a codeword $$Y$$:
+
+$$Y = GM + E$$
+
+where $$G$$ is the generating matrix, $$M$$ the initial message and $$E$$ an error (refer to Part II for the details). The error $$E$$ is a matrix, and if its rank is small enough, by construction of our rank metric code, we should be able to correct it. Namely, we have unique decoding as long as
+
+$$\operatorname{rk}E \leq t = \left\lfloor \frac{d_r - 1}{2} \right\rfloor.$$
+
+> **Note:** the question of list decoding in the rank metric is still very much active research, we won't discuss it here.
+
+What does that mean for $$E$$ to have small rank? Let's take a small example to work out, over $$\mathbb F_{q^m}^n$$ with $$q = 2, m=3, n=4, t = 1$$.
+Let's try to understant what it means that the rank of $$E$$ is $$\leq t$$.
+
+> **Exercise:** show that there are exactly 32 rank 1 matrices there are in $$\mathbb F_{q^m}^n$$.
+
+Accounting for the zero matrix, of rank 0, there are 33 words at rank distance 1 of any codeword. Note that here this coincides with the number of elements at Hamming distance 1 of zero ($$1 + 4 \cdot 8 = 33$$), which really is a coincidence. Indeed, if you tried to solve the above exercise you realised that rank 1 matrices have a "special shape".
+
+This is a general phenomenon: any rank $$t$$ matrix $$E$$ can be written (not uniquely)
+
+$$E = LV^\top = \sum_{i=1}^t L_i V_i$$
+
+where $$L$$, $$T$$ are vectors of size $$t$$. In a sense, $$L$$ gives error locations and $$V$$ gives the error values.
+
+> **Note:** we only consider errors in this post, but rank metric codes are also good at handling erasures: if $$r$$ is the number of row erasures and $$c$$ the number of column erasures, then an MRD code can correct if $$2t + c + r \leq d_r + 1$$.
+
+# II. Syndrome decoding
+
+One way to approach the decoding of any linear code is **syndrome decoding**. Let $$H$$ be the code's [parity matrix][wppcm], obtained from the generating matrix $$G$$ as the unique matrix solution to
+
+$$G H^\top = 0.$$
+
+Since our code is MRD, the dimensions of $$H$$ are $$d-1$$ rows and $$n$$ columns.
+
+> **Exercise:** show that the entries of $$H$$ are of the form $$h_{j}^{[i]}$$ for a certain set of values $$h = (h_1, \dotsc, h_n)$$ with each $$h_i \in \mathbb F_{q^m}$$. The sets $$g$$ and $$h$$ are called **dual bases**.
+
+As an example, consider the the Gabidulin code over $$\mathbb F_{q^m}$$ with $$q = 2, n=m=5, k = 5$$ with generating set $$g = (\alpha, \alpha^{30}, \alpha^{18}, \alpha^7, \alpha^{20})$$ where $$\alpha$$ is a primitive element of $$\mathbb F_{2^5}$$. The generating matrix and parity matrix are
+
+$$G = \begin{pmatrix} \alpha & \alpha^{30}& \alpha^{18}&  \alpha^7&  \alpha^{20}\end{pmatrix} \qquad \text{and} \qquad H = \begin{pmatrix}
+\alpha^{2} & \alpha^{29} & \alpha^{5} & \alpha^{14} & \alpha^{9} \\
+\alpha^{4} & \alpha^{27} & \alpha^{10} & \alpha^{28} & \alpha^{18} \\
+\alpha^{8} & \alpha^{23} & \alpha^{20} & \alpha^{25} & \alpha^{5} \\
+\alpha^{16} & \alpha^{15} & \alpha^{9} & \alpha^{19} & \alpha^{10}
+\end{pmatrix}$$
+
+Of course, the parity matrix of $$C$$ is nothing else but the generator matrix of its Delsarte dual $$C^\top$$ (see Part I). A valid codeword
+
+$$\widehat{\operatorname{ev}}_gf = (\widehat f(g_1), \dotsc, \widehat f(g_n))$$
+
+is an element of the vector space spanned by the columns of $$G$$ and therefore is orthogonal to $$H$$. We therefore defined the **syndrome** of a vector $$X$$ as the vector $$s(X) = X H^\top$$. Since by construction, all codewords have syndrome zero, only errors appear:
+
+$$s(Y) = Y H^\top = EH^\top = LVH^\top = LU$$
+
+where $$U = VH^\top$$ has a particular form
+
+$$
+\begin{pmatrix}
+u_1 & u_1^{[1]} & \cdots & u_1^{[d_r - 2]} \\
+\vdots & \vdots & \ddots & \vdots \\
+u_t & u_t^{[1]} & \cdots & u_t^{[d_r - 2]}
+\end{pmatrix}
+$$
+
+The equation $$s(Y) = LU$$ then reads, coordinate-wise,
+
+$$s_\ell = \sum_{i = 1}^t L_i u_i^{[\ell]}, \quad \text{for $\ell = 0, 1, \dotsc, d_r-2$}.$$
+
+We have unknown $$u_1, \dotsc, u_{t}$$ and $$L_1, \dotsc, L_t$$. There are $$2t$$ unknowns, we have $$d_r-2$$ independent linear equations between them, the code is MRD: there is a unique solution. **Decoding a Gabidulin code can be done efficiently** since it is reduced to solving a linear system -- this was far from obvious.
+
+Let's work an example. Consider the Gabidulin code with parameters $$q=2, n=m=3, k=1$$, with generating set $$g = (1, \alpha^3, \alpha^4)$$, $$\alpha$$ being a primitive element of $$\mathbb F_{q^m}$$. Say we received a vector $$Y = (\alpha^6, 1, \alpha^3)$$ and assume the error has rank 1.
+
+- The parity matrix for this code is $$H = \left(\begin{smallmatrix}1 & \alpha & \alpha^2 \\ 1 & \alpha^2 & \alpha^4 \end{smallmatrix}\right)$$;
+- The error being of rank 1, we can write $$E = eV$$ with $$e \in \mathbb F_8$$ and $$V = (v_1, v_2, v_3) \in \mathbb F_2^3$$;
+- The syndrome is $$y H^\top = (\alpha^3, \alpha^6) = e (u_1, u_1^2)$$
+- Solving for $$u_1 = s_1/s_0 = \alpha^3$$ and for $$e = s_0/u_1 = 1$$ we find the error to be $$E = (1, 0, 1)$$ and therefore the error-free codeword is $$Y-E = (\alpha^4, 1, \alpha)$$
+
+> **Exercise:** assume we received $$Y = (\alpha^5, 0, \alpha^6)$$, show that the error-free codeword is $$(\alpha^5, \alpha, \alpha^2)$$. What about $$Y = (\alpha^3, 1, 0)$$?
+
+Ok so _syndrome decoding works__ but maybe we can afford to go the extra mile and design a _somewhat efficient_ decoder. Also, we would like to avoid having to figure out the parity matrix.
+
+# III. Back to linearised polynomials
+
+Recall (from Part II) that linearised polynomials form an [Ore ring][wpore], where addition is standard polynomial addition and "multiplication" is composition, namely
+
+$$(\widehat P \cdot \widehat Q)(X) = \widehat P(\widehat Q(X))= \sum_{i}\left( \sum_{j=0}^i P_j Q_{i-j}^{[j]}\right)X^{[i]}.$$
+
+This operation is _not commutative_, and its multiplicative identity is $$\widehat 1 = X^{[0]} = X$$. Furthermore, for any two polynomials $$P, Q$$, we have the identity $$\widehat P \cdot \widehat Q = \widehat{PQ}$$ (the product on the lhs is composition, the product on the rhs is standard multiplication).
+
+From there is it easy to see that the ring of linearised polynomials on $$\mathbb F_{q^m}$$ is a left- and right-[Euclidean domain][wpeucldom]: for any $$\widehat A, \widehat B$$, there exist unique $$\widehat Q_R, \widehat Q_L, \widehat R_R, \widehat R_L$$ such that
+
+$$\begin{align*}\widehat A & = \widehat Q_R \cdot \widehat B + \widehat R_R & \deg R_R < \deg B\\ \widehat A & = \widehat B \cdot \widehat Q_L + \widehat R_L & \deg R_L < \deg B\end{align*}$$
+
+These are called **right and left division** (resp. quotient, remainder). Both left and right divisions can be computed efficiently. Since we shall need it, let's see how to do this with SageMath on a simple example
+
+```python
+Fqm.<t> = GF(5^3)                          # t is the primitive element
+Frob    = Fqm.frobenius_endomorphism()
+LP.<X>  = Fqm['X', Frob]                   # Ring of linearised polynomials
+
+P = X^5 + X + 1
+Q = X^3 + t*X + 1
+
+P.left_quo_rem(Q)       # Left division
+P.right_quo_rem(Q)      # Right division
+```
+
+You see in running the above code that we get different results for left and right division. "Traditional" polynomial division gives yet another result:
+
+```python
+R.<x> = Fqm['x']    # Ring of polynomials
+
+P = x^5 + x + 1
+Q = x^3 + t*x + 1
+
+P.quo_rem(Q)        # Standard polynomial division
+```
+
+SageMath also provides the (left and right) [extended Euclidean algorithm][wpeea] (LEEA) for linearised polynomials. 
+
+Unfortunately for us, at the time of writing, all this is still an experimental feature and it seems buggy (although [the corresponding ticket was closed long ago][sagetrac]). That means we'll have to implement linearised polynomials ourselves, which is not that hard, and we'll deal with division when the right time comes.
+
+# IV. Decoding by polynomial reconstruction
+
+In this section we'll make use of our knowledge in linearised polynomials to design a decoder that is more efficient than the syndrome decoder.
+
+Consider the following problem: given $$q, n, m, k, t$$, $$g = (g_1, \dotsc, g_n)$$, $$Y = (Y_1, \dotsc, Y_n)$$, find non-zero polynomials $$V, W$$ such that
+
+- $$\deg V \leq t$$;
+- $$\deg W \leq k + t - 1$$;
+- for all $$i = 1, \dotsc, n$$, $$\widehat V(Y_i) = \widehat W(g_i) $$.
+
+This is a linear system whose unknowns are the coefficients of $$V, W$$. Indeed, we have $$n$$ equations of the form
+
+$$\sum_{j = 0}^{t} V_j Y_i^{[j]} = \sum_{j = 0}^{k+t-1} W_j g_i^{[j]} ,$$
+
+or in matrix form:
+
+$$
+\begin{pmatrix}
+g_1 & \cdots & g_1^{[k+t-1]} & -Y_1 & \cdots & -Y_1^{[t]} \\
+\vdots & \ddots & \vdots & \vdots & \ddots & \vdots \\
+g_n & \cdots & g_n^{[k+t-1]} & -Y_n & \cdots & -Y_n^{[t]}
+\end{pmatrix}
+\cdot
+\begin{pmatrix}
+W_0\\\vdots\\W_{k+t-1}\\V_0\\\vdots\\V_t
+\end{pmatrix}
+= 0
+$$
+
+Let's try an example: $$q = 2, n = m = 3, k = 1$$, we take a normal basis for $$g$$ from a primitive element $$\alpha$$ and consider $$Y = (\alpha^2 + \alpha + 1, \alpha^ 2,\alpha+1)$$. The system to solve is
+
+$$
+\begin{pmatrix}
+\alpha & \alpha^2 & \alpha^2 + \alpha + 1 & \alpha + 1\\
+\alpha^2  & \alpha^2 + \alpha & \alpha^2 & \alpha^2 + \alpha\\
+\alpha^2 + \alpha & \alpha & \alpha + 1 & \alpha^2 + 1
+\end{pmatrix}
+\begin{pmatrix}
+W_0\\W_1\\V_0\\V_1
+\end{pmatrix}
+=0.
+$$
+
+We get a solution $$W_0 = 1, W_1 = 0, V_0 = 0, V_1 = \alpha^2 + \alpha + 1$$. Let's check that it works as intended:
+
+$$\begin{align*}
+\widehat W(g_1) & = g_1 = \alpha \\
+\widehat W(g_2) & = g_2 = \alpha^2 \\
+\widehat V(Y_1) & = (\alpha^2 + \alpha + 1) Y_1^{[1]} = (\alpha^2 + \alpha + 1) Y_1^2 = (\alpha^2 + \alpha + 1)(\alpha + 1) = \alpha\\
+\widehat V(Y_2) & = (\alpha^2 + \alpha + 1) Y_2^2 = \alpha^2
+\end{align*}
+$$
+
+> **Exercise:** check that we also have $$\widehat V(Y_3) = \widehat W(g_3) $$.
+
+> **Note:** this is one of the places where we run into bugs with SageMath: evaluation of linearised polynomials sometimes gives incorrect results...
+
+All is good! Let make this into a SageMath snippet, since we'll make use of it:
+
+```python
+def multi_exp(a, r):
+    # Returns a, a^[1], ..., a^[r]
+    return [a^(q^i) for i in range(r+1)]
+
+def find_VW(g, Y, k, t):
+    # Finds the polynomials V and W s.t. V̂(Y_i) = Ŵ(g_i) 
+    # with degree resp. <= t and <= k + t - 1 
+    S = Matrix([
+        multi_exp(g_i, k+t-1) +                    # gi, gi^[1]...
+        list(map(lambda x:-x, multi_exp(y_i, t)))  # -Yi, -Yi^[1]...
+        for (g_i, y_i) in zip(g, Y)
+    ])
+    z = S.transpose().kernel().basis()[0]
+
+    # Returns W, V as the list of their coefficients
+    return  z[:k+t], z[k+t:]
+```
+
+Why was this problem relevant? If $$Y$$ was an error-free codeword, i.e., $$Y_i = \widehat f(g_i)$$ then $$\widehat V(Y_i) = (\widehat V \cdot \widehat f)(g_i)$$. In other terms, given a solution $$V, W$$ of the above problem, the Euclidean (left) division $$W/V$$ gives us the error-free codeword.
+
+Our decoding algorithm is therefore conceptually simple:
+
+1. Run `find_VW` on received input $$Y$$ to get $$V, W$$;
+2. Compute the left division $$\widehat f = \widehat W/\widehat V$$ which is our error-free codeword.
+
+> **Note:** if there is no error, then the division is exact (i.e., the remainder is zero) and in fact we have $$f = W/V$$ with the _classical_ Euclidean division algorithm.
+
+The main cost of our algorithm is `find_VW`, which naively solves a linear system. The total complexity is about $$O(n^3)$$ which is acceptable for a prototype, but hardly competitive.
+
+The complete decoder, comments and whiteline included, fits in 40 lines of SageMath:
+
+```python
+# Code parameters
+q = 7^2
+n = 3
+m = 3
+k = 1
+
+# Gabidulin codes are MRD code
+d = n - k + 1
+t = (d - 1)/2
+
+# Algebraic structures
+Fqm.<u> = GF(q^m)
+R.<x> = Fqm['x']                        # Standard polynomials
+pi    = Fqm.frobenius_endomorphism()    
+L.<X> = Fqm['X', pi]                    # Linearised polynomials
+
+def multi_exp(a, r):
+    # Returns a, a^[1], ..., a^[r]
+    return [a^(q^i) for i in range(r+1)]
+
+def find_VW(g, Y, k, t):
+    # Finds the polynomials V and W s.t. V̂(Y_i) = Ŵ(g_i) 
+    # with degree resp. <= t and <= k + t - 1 
+    S = Matrix([
+        multi_exp(g_i, k+t-1) +                    # gi, gi^[1]...
+        list(map(lambda x:-x, multi_exp(y_i, t)))  # -Yi, -Yi^[1]...
+        for (g_i, y_i) in zip(g, Y)
+    ])
+    z = S.transpose().kernel().basis()[0]
+
+    # Returns W, V as the list of their coefficients
+    return  z[:k+t], z[k+t:]
+
+def decode(g, Y, k, t):
+    W, V = find_VW(g, Y, k, y)
+    W_linpol = sum(W_i * X^i for i, W_i in enumerate(W))
+    V_linpol = sum(V_i * X^i for i, V_i in enumerate(W))
+    f, _err   = W_linpol.left_quo_rem(V_linpol)
+
+    # Convert back f into a standard polynomial
+    return sum(f_i * x^i for i, f_i in enumerate(f.list()))
+```
+
+> **Note:** there exist much faster algorithms for decoding which, together with clever choices of parameters, achieve a impressive subquadratic decoding complexity (and similarly for encoding!). Here is one such algorithm by [Puchinger and Wachter-Zeh][pwz] (2016) that runs in $$O(n^{1.69} \log^2 n)$$.
+
+> **Note:** at the time of writing, rank metric codes themselves have very patchy support in Sage (although it should be possible to invoke Pari to do the heavy lifting and there was a [GSoC on the matter in 2016][gsoc]). If you are looking for a useful contribution to the open source / mathematical community, please consider improving this!
+
+# Next expisode: an application
+
+We have our Gabidulin encoder and decoder, what are we supposed to do with them? Besides the theoretical interest (didn't you enjoy the detour around Ore rings?) we'll discuss **next time** (to be written) one of the main motivations for rank metric codes: random network coding, a technique for data transmission that can outperform routing in some situations.
+
+_Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
+
+[wppcm]: https://en.wikipedia.org/wiki/Parity-check_matrix
+[wpbw]: https://en.wikipedia.org/wiki/Berlekamp%E2%80%93Welch_algorithm
+[pwz]: https://arxiv.org/pdf/1601.06280.pdf
+[wpeucldom]: https://en.wikipedia.org/wiki/Euclidean_domain
+[wpeea]: https://en.wikipedia.org/wiki/Extended_Euclidean_algorithm
+[wpore]: https://en.wikipedia.org/wiki/Ore_extension
+[sagetrac]: https://trac.sagemath.org/ticket/13215
+[gsoc]: https://arpitdm.wordpress.com/2016/08/23/project-linear-rank-metric-codes-in-sage-gsoc-2016/
+[coffee]: https://www.buymeacoffee.com/shargs

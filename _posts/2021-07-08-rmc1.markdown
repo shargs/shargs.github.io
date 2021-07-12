@@ -14,13 +14,15 @@ image:
 
 - [**Part I: Basic definitions**]({% post_url 2021-07-08-rmc1 %}) 
 - [Part II: Constructing Gabidulin codes]({% post_url 2021-07-08-rmc2 %}) 
-- Part III: Decoding Gabiduling codes
+- [Part III: Decoding Gabiduling codes]({% post_url 2021-07-11-rmc3 %})
 - Part IV: Application to random network linear coding
 
 
-In the classical theory of error-correcting codes, errors are measured in terms of their [Hamming distance][wphamming] to codewords, $$d_H$$. However this is not the only possible choice of distance, and authors have investigated several alternatives. In this post, we explore the **rank metric**.
+In the classical theory of error-correcting codes, errors are measured in terms of their [Hamming distance][wphamming] to codewords, $$d_H$$. However this is not the only possible choice of distance, and authors have investigated several alternatives. In this series, we explore the [**rank metric**][wprank].
 
 Our goal in the end is (once the basic definitions and motivations are laid out) to write an encoder and a decoder for the Delsarte-Gabidulin MRD codes. One application and source of motivation for studying such codes, which comes back to papers by Kötter and Kschischang in 2008, is [random network coding][wpcoding] about which we'll say a few words.
+
+In this first post, we lay out the basic definitions and properties of rank metric codes.
 
 # I. What is the rank metric? 
 
@@ -141,4 +143,5 @@ _Did you like this? Do you want to support this kind of stuff? Please share arou
 [wppuncture]: https://en.wikipedia.org/wiki/Puncturing
 [wpstc]: https://en.wikipedia.org/wiki/Space%E2%80%93time_code
 [wpcoding]: https://en.wikipedia.org/wiki/Linear_network_coding
+[wprank]: https://en.wikipedia.org/wiki/Rank_error-correcting_code
 [coffee]: https://www.buymeacoffee.com/shargs

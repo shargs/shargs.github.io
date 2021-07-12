@@ -12,9 +12,9 @@ image:
 
 **This post is part of a series on rank-metric codes**:
 
-- [Part I: Basic definitions]({% post_url 2021-07-08-rmc1 %}) 
-- [**Part II: Constructing Gabidulin codes**]({% post_url 2021-07-08-rmc2 %}) 
-- Part III: Decoding Gabiduling codes
+- [Part I: Basic definitions]({% post_url 2021-07-08-rmc1 %})
+- [**Part II: Constructing Gabidulin codes**]({% post_url 2021-07-08-rmc2 %})
+- [Part III: Decoding Gabiduling codes]({% post_url 2021-07-11-rmc3 %})
 - Part IV: Application to random network linear coding
 
 In this post, we'll discuss the background behind Gabidulin codes, which are an important family of rank metric codes, and design a simple encoder for them in SageMath. Throughout this post, $$q$$ is a prime power.
@@ -51,7 +51,7 @@ is linear, and therefore defines a linear code: the well-known [Reed-Solomon cod
 
 $$\widehat{\operatorname{ev}}_g:= P \mapsto \operatorname{ev}_g(\widehat P).$$
 
-In other terms, we evaluate $$\widehat P$$ instead of $$P$$. In the rank metric, Gabidulin codes attain the Delsarte-Singleton bound and are therefore MRD (see Part I of this post series). 
+In other terms, we evaluate $$\widehat P$$ instead of $$P$$. In the rank metric, Gabidulin codes attain the Delsarte-Singleton bound and are therefore MRD (see Part I of this post series).
 
 > **Exercise:** prove this.
 
@@ -73,9 +73,9 @@ Several improvements on this basic approach can be thought of. Here we keep thin
 
 #### III.1. Parameter set
 
-We'll settle on $$q = 2^{8} = 256$$, $$n = m = 8$$ and $$k = 4$$. 
+We'll settle on $$q = 2^{8} = 256$$, $$n = m = 8$$ and $$k = 4$$.
 
-Working in a binary field means easier arithmetic operations and the choice of $$q, m$$ means that each element of $$\mathbb F_{q^m}$$ is a 64-bit integer. Every codeword is a vector of size 512 bit (i.e., 64 bytes), and we can encode 32-bit messages (i.e., 4 bytes). 
+Working in a binary field means easier arithmetic operations and the choice of $$q, m$$ means that each element of $$\mathbb F_{q^m}$$ is a 64-bit integer. Every codeword is a vector of size 512 bit (i.e., 64 bytes), and we can encode 32-bit messages (i.e., 4 bytes).
 
 We'll need a basis of $$\mathbb F_{q^m}$$ as a $$\mathbb F_q$$-vector space; the (primitive) [normal basis][wpnormbas] will work: let $$\zeta$$ be a primitive element of $$\mathbb F_{q^m}$$, then a basis is given by the set $$\{b_1, \dotsc, b_m \}$$ where
 
@@ -93,7 +93,7 @@ zeta  = Fqm.gen()
 basis = [zeta^(q^j) for j in range(m)]
 ```
 
-By the Delsarte--Singleton bound we have minimal rank $$d_r= n + 1 - k = 5$$, which gives an error correction capacity of 
+By the Delsarte--Singleton bound we have minimal rank $$d_r= n + 1 - k = 5$$, which gives an error correction capacity of
 
 $$t = \left\lfloor \frac{d_r - 1}{2} \right\rfloor = 2$$
 
@@ -105,7 +105,7 @@ We need to find $$n= 8$$ values $$g_i \in\mathbb F_{q^m}$$, which are $$\mathbb 
 
 $$g_1 = b_1, g_2= b_2, \dotsc, g_n = g_m = b_m.$$
 
-Other choices are of course possible. Observe that with this particular basis, 
+Other choices are of course possible. Observe that with this particular basis,
 $$g_i^{[j]} = \zeta^{[i+j]}$$, although we won't make use of this fact here.
 
 Furthermore, since we will be evaluating polynomials of degree at most $$k$$, we only really need $$g_1, \dotsc, g_k$$.
@@ -162,7 +162,7 @@ def pretty_print_codeword(C):
     print('\n'.join(serialize(C))) 
 ```
 
-# IV. Testing all this! 
+# IV. Testing all this
 
 ```python
 C = encode("rank")
@@ -186,10 +186,9 @@ Unsurprisingly, there is a large expansion factor (16 times) because of our rath
 
 # Next time: a Gabidulin decoder
 
-One may wonder why we didn't "just give the generator matrix" right away. Besides the fact that one needs to build this matrix differently for different situations, and the various properties that require some theory to understand, there is really no other way to see that Gabidulin codes are to the rank metric what Reed-Solomon codes are to the Hamming metric. 
+One may wonder why we didn't "just give the generator matrix" right away. Besides the fact that one needs to build this matrix differently for different situations, and besides the language needed to state the various properties of interest, the theory behind Gabidulin codes makes visible that **Gabidulin codes are to the rank metric what Reed-Solomon codes are to the Hamming metric**.
 
-But the real, deep reason for this burst of theory is something we'll see in the **next part** (to be written). As is typical in code theory, decoding is the hard part. Erros in the rank metric are also strange beasts, we'll look into that. Stay tuned!
-
+But the real, deep reason for this burst of theory is something we'll see in [the next part]({% post_url 2021-07-11-rmc3 %}). As is typical in code theory, decoding is the hard part. Errors in the rank metric are also strange beasts, we'll look into that. Stay tuned!
 
 _Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
 
