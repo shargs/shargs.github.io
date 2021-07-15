@@ -6,7 +6,6 @@ categories: codes
 tags: [codes]
 image: 
 ---
-{% include mathjax.html %}
 
 > _**Disclaimer:** this is not final. If you find mistakes, please report them._
 
@@ -15,7 +14,7 @@ image:
 - [Part I: Basic definitions]({% post_url 2021-07-08-rmc1 %})
 - [Part II: Constructing Gabidulin codes]({% post_url 2021-07-08-rmc2 %})
 - [**Part III: Decoding Gabiduling codes**]({% post_url 2021-07-11-rmc3 %})
-- Part IV: Application to random network linear coding
+- [Part IV: Application to random network linear coding]({% post_url 2021-07-12-rmc4 %})
 
 We have now designed a simple encoder for Gabidulin codes (part 2) which are in a sense optimal codes in the rank metric (part 1). What remains to do is to decode them, which is as usual the hard part.
 
@@ -137,7 +136,7 @@ Q = x^3 + t*x + 1
 P.quo_rem(Q)        # Standard polynomial division
 ```
 
-SageMath also provides the (left and right) [extended Euclidean algorithm][wpeea] (LEEA) for linearised polynomials. 
+SageMath also provides the (left and right) [extended Euclidean algorithm][wpeea] (LEEA) for linearised polynomials.
 
 Unfortunately for us, at the time of writing, all this is still an experimental feature and it seems buggy (although [the corresponding ticket was closed long ago][sagetrac]). That means we'll have to implement linearised polynomials ourselves, which is not that hard, and we'll deal with division when the right time comes.
 
@@ -282,7 +281,7 @@ def decode(g, Y, k, t):
 
 # Next expisode: an application
 
-We have our Gabidulin encoder and decoder, what are we supposed to do with them? Besides the theoretical interest (didn't you enjoy the detour around Ore rings?) we'll discuss **next time** (to be written) one of the main motivations for rank metric codes: random network coding, a technique for data transmission that can outperform routing in some situations.
+We have our Gabidulin encoder and decoder, what are we supposed to do with them? Besides the theoretical interest (didn't you enjoy the detour around Ore rings?) we'll discuss [**next time**]({% post_url 2021-07-12-rmc4 %})  one of the main motivations for rank metric codes: random network coding, a technique for data transmission that can outperform routing in some situations.
 
 _Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
 

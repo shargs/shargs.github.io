@@ -6,17 +6,15 @@ categories: codes
 tags: [codes]
 image: 
 ---
-{% include mathjax.html %}
 
 > _**Disclaimer:** this is not final. If you find mistakes, please report them._
 
 **This post is part of a series on rank-metric codes**:
 
-- [**Part I: Basic definitions**]({% post_url 2021-07-08-rmc1 %}) 
-- [Part II: Constructing Gabidulin codes]({% post_url 2021-07-08-rmc2 %}) 
+- [**Part I: Basic definitions**]({% post_url 2021-07-08-rmc1 %})
+- [Part II: Constructing Gabidulin codes]({% post_url 2021-07-08-rmc2 %})
 - [Part III: Decoding Gabiduling codes]({% post_url 2021-07-11-rmc3 %})
-- Part IV: Application to random network linear coding
-
+- [Part IV: Application to random network linear coding]({% post_url 2021-07-12-rmc4 %})
 
 In the classical theory of error-correcting codes, errors are measured in terms of their [Hamming distance][wphamming] to codewords, $$d_H$$. However this is not the only possible choice of distance, and authors have investigated several alternatives. In this series, we explore the [**rank metric**][wprank].
 
@@ -24,7 +22,7 @@ Our goal in the end is (once the basic definitions and motivations are laid out)
 
 In this first post, we lay out the basic definitions and properties of rank metric codes.
 
-# I. What is the rank metric? 
+# I. What is the rank metric?
 
 Given a matrix $$M$$, its [rank][wprank] is the number of linearly independent columns (or, equivalently, rows). We write it $$\mathrm{rk}M$$.
 
@@ -42,7 +40,7 @@ This allows us to define the objects that we'll be interested in: classical line
 
 > **Note on history**: the idea of studying the rank metric seems to have originated in several minds independently; undoubtedly Delsarte was the first to prove important properties in 1978, and who saw rank-metric codes as [$$q$$-analogues][wpqanalog]. They were rediscovered by Gabidulin in 1985 in the completely different context of [array error correction][wpstc], and again by Roth in 1991. (Some Chinese authors even claim a prior idea of Hua, which I cannot confidently verify). There has been some interest in rank-metric codes in cryptography, although they do not seem well-suited for such applications.
 
-There are still many open questions in the theory of rank-metric codes. Our angle for this post series is, following Gabidulin, the construction of an "optimal" (MRD, see below) code with given parameters. 
+There are still many open questions in the theory of rank-metric codes. Our angle for this post series is, following Gabidulin, the construction of an "optimal" (MRD, see below) code with given parameters.
 
 # II. Building the (matrix) vector space
 
@@ -57,7 +55,7 @@ When $$m=1$$, the rank metric becomes identical to the Hamming metric. In genera
 
 > **Exercise:** show that for any $$x, y \in \mathbb F_{q^m}^n$$, we have $$d_G(x, y) \leq d_H(x, y)$$.
 
-# III. Singleton-Delsarte bound, Anticode bound 
+# III. Singleton-Delsarte bound, Anticode bound
 
 The rank of a matrix cannot exceed the smallest of the matrix's dimensions. If $$C$$ is a linear rank-metric code of parameters $$[n, k, d_r]$$ -- that is to say, a $$k$$-dimensional vector subspace of $$\mathbb F_{q^m}^n$$ in which any two distinct elements at at rank distance at least $$d_r$$ of each other -- then Delsarte showed the following inequality (called the **Delsarte-Singleton inequality**):
 
@@ -75,7 +73,7 @@ A rather harder result, which was initially found by Meshulam, is known as the *
 
 $$k \leq \max(n, m) \cdot \max_{c \in C} \operatorname{rk}c$$
 
-A code attaining this bound is called **optimal anticode**. These are not difficult to obtain, in fact here is one such code: the subset of $$\mathbb F_{q^m}^n$$ made of matrices whose last $$n-k$$ rows are zero -- this is a code of dimension $$mk$$ with all codewords of rank $$k$$. In a sense, this is the polar opposite of MRD codes. 
+A code attaining this bound is called **optimal anticode**. These are not difficult to obtain, in fact here is one such code: the subset of $$\mathbb F_{q^m}^n$$ made of matrices whose last $$n-k$$ rows are zero -- this is a code of dimension $$mk$$ with all codewords of rank $$k$$. In a sense, this is the polar opposite of MRD codes.
 
 # IV. New codes from old ones
 
@@ -101,7 +99,6 @@ Similarly, the Delsarte dual of an optimal anticode is optimal anticode.
 
 > **Exercise:** combining the Delsarte-Singleton and anticode bounds, show that $$d_r < \max_{c \in C^\bot}\operatorname{rk}c$$.
 
-
 #### IV.2. Adjoint code
 
 There is also, owing to the matrix form of our elements, an additional transformation that yields a code: the **adjoint code** $$C^\top$$ is the code of $$\mathbb F_{q^n}^m$$ obtained by transposing each codeword of $$C$$. Obviously, $$C^{\top\top} = C$$, and a code is MRD if and only if its adjoint is MRD.
@@ -122,11 +119,9 @@ The following properties hold:
 
 # Next episode: Building an MRD code
 
-In the [next part of this series]({% post_url 2021-07-08-rmc2 %}), we will construct a family of MRD codes and implement an encoder in SageMath. Stay tuned! 
+In the [next part of this series]({% post_url 2021-07-08-rmc2 %}), we will construct a family of MRD codes and implement an encoder in SageMath. Stay tuned!
 
 _Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
-
-
 
 [wphamming]: https://en.wikipedia.org/wiki/Hamming_distance
 [wprank]: https://en.wikipedia.org/wiki/Rank_(linear_algebra)

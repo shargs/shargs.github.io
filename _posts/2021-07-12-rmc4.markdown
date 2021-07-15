@@ -1,0 +1,456 @@
+---
+layout: post
+title:  "Rank-metric codes, Part IV: Application to random network linear coding"
+date:   2021-07-12
+categories: codes
+tags: [codes]
+image: 
+---
+
+> _**Disclaimer:** this is not final. If you find mistakes, please report them._
+
+**This post is part of a series on rank-metric codes**:
+
+- [Part I: Basic definitions]({% post_url 2021-07-08-rmc1 %})
+- [Part II: Constructing Gabidulin codes]({% post_url 2021-07-08-rmc2 %})
+- [Part III: Decoding Gabiduling codes]({% post_url 2021-07-11-rmc3 %})
+- [**Part IV: Application to random network linear coding**]({% post_url 2021-07-12-rmc4 %})
+
+This if the fourth (and final) post in a series on rank metric codes. We focus here on one remarkable application of such codes, in the context of **random linear network coding** (RLNC).
+This post is less technical and can be read mostly independently of the others, except for the details of how rank metric codes work of course.
+
+# I. What is network coding and what problem does it solve?
+
+Imagine you are part of a computer network and wish to send data from point $$A$$ to point $$B$$. The network could look something like this
+
+<center>
+<script type="text/tikz">
+  \begin{tikzpicture}
+    \draw[very thick] (0,0) to (2, 1) to (4,0) to (6, 1) to (10, 0);
+    \draw[very thick] (0,0) to (3, -2) to (6,-1) to (8, -1) to (10, 0);
+    \draw[very thick] (3,-2) to (4, 0) to (6,-1) to (6, 1);
+
+    \draw[thick,blue,fill=white] (0,0) circle (5mm);
+    \node[color=blue] (source) at (0,0) {$A$};
+    \draw[thick,red,fill=white] (10,0) circle (5mm);
+    \node[color=red] (sink) at (10, 0) {$B$};
+
+    \draw[thick,fill=white] (3,-2) circle (5mm);
+    
+    \draw[thick,fill=white] (2,1) circle (5mm);
+
+    \draw[thick,fill=white] (4,0) circle (5mm);
+    \draw[thick,fill=white] (6,-1) circle (5mm);
+    \draw[thick,fill=white] (8,-1) circle (5mm);
+    \draw[thick,fill=white] (6,1) circle (5mm);
+  \end{tikzpicture}
+</script>
+<br/>
+<em>Fig. 1: An example network.</em>
+</center>
+<br/>
+
+We assume that we have no control over the network connections themselves: we can't create [direct links][wpcs] between whoever we want. (That doesn't mean the network is _fixed_: it may change all the time, we simply have no power over it.) Instead we will need to rely on our immediate neighbours to carry the message around (or chunks thereof). A message chunk is called a **packet** and this general approach is called [**packet switching**][wpps].
+
+Packet switching is used for most modern networks, including the Internet and for mobile phone communications. To make it efficient, each packet is labeled with its destination (and some additional metadata), and network equipment tries to find an quick path to the destination using [a][wpbroadvariants] / [variety][wpbroadcast] / [of][wpgeocast] / [methods][wproutingmany].
+
+<center>
+<script type="text/tikz">
+  \begin{tikzpicture}
+    \draw[very thick,green!50!black] (0,0) to (2, 1) to (4,0) to (6, 1) to (10, 0);
+    \draw[thin] (0,0) to (3, -2) to (6,-1) to (8, -1) to (10, 0);
+    \draw[thin] (3,-2) to (4, 0) to (6,-1) to (6, 1);
+
+    \draw[thick,blue,fill=white] (0,0) circle (5mm);
+    \node[color=blue] (source) at (0,0) {$A$};
+    \draw[thick,red,fill=white] (10,0) circle (5mm);
+    \node[color=red] (sink) at (10, 0) {$B$};
+
+    \draw[thick,green!50!black,fill=white] (2,1) circle (5mm);
+    \draw[thick,green!50!black,fill=white] (4,0) circle (5mm);
+    \draw[thick,green!50!black,fill=white] (6,1) circle (5mm);
+    
+    \draw[thin,fill=white] (3,-2) circle (5mm);
+    \draw[thin,fill=white] (6,-1) circle (5mm);
+    \draw[thin,fill=white] (8,-1) circle (5mm);
+  \end{tikzpicture}
+</script>
+<br/>
+<em>
+Fig. 2: Routing a packet from A to B: packet is sent from hop to<br/>
+hop, following the green path, until it reaches the destination.
+</em>
+</center>
+<br/>
+
+An alternative, which we explore in this post, is to **modify packets as they transit**, using the network not merely as a vessel for information but as an active participant in communication. This idea is called **network coding** and sprouted in the late 1970s, with a strong revival in the 2000s. Early results showed that -- in theory -- **network coding would
+achieve higher throughput, especially in a multi-source-multi-sink setting, and greater efficiency than store-and-forward protocols**.
+
+Thus, network coding aims at getting the most out of a network of active nodes to transfer data between producers and consumers.
+
+# II. Linear network coding: idea, benefits, and limitations
+
+In this post we'll be insterested in [linear network coding][wplincode], in which the only mathematical operation we ask the network's nodes to perform are linear: addition, subtraction, or scalar multiplication. While this may sound limiting, it is actually sufficient to reach optimal results in many settings, and these operations are naturally very efficient to implement.
+
+Here is a simple scenario in which linear network coding outperforms packet switching: $$A$$ and $$B$$ are connected through an intermediary. Imagine $$A$$ wants to send a message $$x$$ to $$B$$, and $$B$$ wants to send a message $$y$$ to $$A$$ (which is unrelated to $$x$$). Assume that connections between devices can only support one packet at a time ([half-duplex][wpduplex]), and can only store one packet at a time.
+
+<center>
+<script type="text/tikz">
+  \begin{tikzpicture}
+    \begin{scope}
+    \begin{scope}
+    \draw[thick,blue,fill=white] (0,0) circle (5mm);
+    \draw[thick,red,fill=white] (6,0) circle (5mm);
+    \draw[thick,green!50!black,fill=white] (3,0) circle (5mm);
+    \node[color=blue] (source) at (0,0) {$A$};
+    \node[color=green!50!black] (source) at (3,0) {$x$};
+    \node[color=red] (sink) at (6, 0) {$B$};
+
+    \draw[very thick,->,>=latex] (0.5, 0) to node[above,midway]{$x$} (2.5,0);
+    \end{scope}
+    \begin{scope}[yshift=-2cm]
+    \draw[thick,blue,fill=white] (0,0) circle (5mm);
+    \draw[thick,red,fill=white] (6,0) circle (5mm);
+    \draw[thick,green!50!black,fill=white] (3,0) circle (5mm);
+    \node[color=blue] (source) at (0,0) {$A$};
+    \node[color=green!50!black] (source) at (3,0) {$x$};
+    \node[color=red] (sink) at (6, 0) {$B$};
+
+    \draw[very thick,->,>=latex] (3.5, 0) to node[above,midway]{$x$} (5.5,0);
+    \end{scope}
+    \begin{scope}[yshift=-4cm]
+    \draw[thick,blue,fill=white] (0,0) circle (5mm);
+    \draw[thick,red,fill=white] (6,0) circle (5mm);
+    \draw[thick,green!50!black,fill=white] (3,0) circle (5mm);
+    \node[color=blue] (source) at (0,0) {$A$};
+    \node[color=green!50!black] (source) at (3,0) {$y$};
+    \node[color=red] (sink) at (6, 0) {$B$};
+
+    \draw[very thick,<-,>=latex] (3.5, 0) to node[above,midway]{$y$} (5.5,0);
+    \end{scope}
+    \begin{scope}[yshift=-6cm]
+    \draw[thick,blue,fill=white] (0,0) circle (5mm);
+    \draw[thick,red,fill=white] (6,0) circle (5mm);
+    \draw[thick,green!50!black,fill=white] (3,0) circle (5mm);
+    \node[color=blue] (source) at (0,0) {$A$};
+    \node[color=green!50!black] (source) at (3,0) {$y$};
+    \node[color=red] (sink) at (6, 0) {$B$};
+
+    \draw[very thick,<-,>=latex] (0.5, 0) to node[above,midway]{$y$} (2.5,0);
+    \end{scope}
+    \end{scope}
+    \begin{scope}[xshift=10cm]
+    \begin{scope}
+    \draw[thick,blue,fill=white] (0,0) circle (5mm);
+    \draw[thick,red,fill=white] (6,0) circle (5mm);
+    \draw[thick,green!50!black,fill=white] (3,0) circle (5mm);
+    \node[color=blue] (source) at (0,0) {$A$};
+    \node[color=green!50!black] (source) at (3,0) {$x$};
+    \node[color=red] (sink) at (6, 0) {$B$};
+
+    \draw[very thick,->,>=latex] (0.5, 0) to node[above,midway]{$x$} (2.5,0);
+    \end{scope}
+    \begin{scope}[yshift=-2cm]
+    \draw[thick,blue,fill=white] (0,0) circle (5mm);
+    \draw[thick,red,fill=white] (6,0) circle (5mm);
+    \draw[thick,green!50!black,fill=white] (3,0) circle (5mm);
+    \node[color=blue] (source) at (0,0) {$A$};
+    \node[color=green!50!black] (source) at (3,0) {$x+y$};
+    \node[color=red] (sink) at (6, 0) {$B$};
+
+    \draw[very thick,<-,>=latex] (3.5, 0) to node[above,midway]{$y$} (5.5,0);
+    \end{scope}
+    \begin{scope}[yshift=-4cm]
+    \draw[thick,blue,fill=white] (0,0) circle (5mm);
+    \draw[thick,red,fill=white] (6,0) circle (5mm);
+    \draw[thick,green!50!black,fill=white] (3,0) circle (5mm);
+    \node[color=blue] (source) at (0,0) {$A$};
+    \node[color=green!50!black] (source) at (3,0) {$x+y$};
+    \node[color=red] (sink) at (6, 0) {$B$};
+
+    \draw[very thick,->,>=latex] (3.5, 0) to node[above,midway]{$x+y$} (5.5,0);
+    \draw[very thick,<-,>=latex] (0.5, 0) to node[above,midway]{$x+y$} (2.5,0);
+    \end{scope}
+   
+    \end{scope}
+
+    \draw (8,-7) to (8,1);
+  \end{tikzpicture}
+</script>
+<br/>
+<em>
+Fig. 3: (Left) packet switching vs. (right) linear network coding.
+</em>
+</center>
+<br/>
+
+Observe that in the network coding scenario, we are really only storing one packet (which is the sum of $$x$$ and $$y$$), we take less time to communicate (3 time slots instead of 2), we better utilse the network (versus a lot of "dead" time with packet switching).
+
+> **Exercise:** on the "[butterfly network][wpbutterfly]", show that no routing strategy can outperform linear network coding.
+
+We could write at length on the claimed benefits of linear network coding, and give several specific cases in which it is shown to be better on some aspect or other than naive packet switching. **But there's a catch**, and that's what's interesting to us.
+
+The catch is that **we need to tell nodes what computation to perform, and they need to do them**. Which has several implications:
+
+- if any node fails to perform the right computation (by mistake or deliberately), the errors with propagate and potentially ruin communication for a large swath of the network;
+- to [determine which computation][koettermedard] each node has to do we need perfect knowledge of the network's topology (if the topology changes during transit, we're in trouble);
+- packets need to carry with them information as to what operations have been performed so far.
+
+All this is impractical: assuming that an dynamically interconnected system of devices is always static error-free and honest is at best naive. So what should we do?
+
+# III. Random linear network coding
+
+In **_random_ linear network coding**, henceforth RLNC, we let go of the idea that we know the network and can tell the nodes what to do. Instead, they are expected to compute **random linear combinations** of the inputs they receive:
+
+$$\text{out}_j = \sum_{i = 1}\alpha_{i,j} \cdot \text{in}_i,$$
+
+where $$\alpha_{i,j}$$ are picked at random. Ultimately, the recipient collects several combinations of the sort: this is a linear system, and if invertible then it is a straightforward linear algebra problem to recover the initial packet(s).
+
+For this system to be invertible, there needs to be enough combinations, and the combinations needs to be linearly independent. The latter condition requires the values $$\alpha_{i,j}$$ to be sampled from a large enough finite field. The former condition may require the sender (or intermediate nodes) to send several copies of a message to ensure it is propertly received, even if the network is lossless. (This is because RLNC is a form of [fountain code][wpfountain].)
+
+So let's fix a field $$\mathbb F_q$$, assume that every transmission carries with it a vector $$c \in \mathbb F_q^r$$ of coefficients of each of the source processes, which is updated by each node as they update the linear combination.
+
+What is nice with this approach is that there is no need to a central authority, for synchronisation, or for a precise knowledge of the network. Nodes don't need to store more than a packet (and the vector of combinations), which makes it efficient. However, RLNC still relies on nodes being honest and reliable.
+
+Before we discuss in the next section how we can hope to fix this, let's look at an interesting example by Ho, Koetter, Médard, Karger and Effros ([who introduced RLNC][hkmke] in 2003). Consider an infinite grid network, where each node is labeled with its coordinates in $$\mathbb Z^2$$. A source node at $$(0,0)$$ sends a packet to its immediate left and another to its immediate right.
+
+<center>
+<script type="text/tikz">
+  \begin{tikzpicture}
+    \foreach \x in {-3,..., 3} {
+        \draw[] (1.5*\x, -2.5*1.5) to (1.5*\x, 2.5*1.5);
+        \foreach \y in {-2, ..., 2} {
+            \draw[fill=black] (1.5*\x,1.5*\y) circle (1.5mm);
+        }
+    }
+    \foreach \y in {-2, ..., 2} {
+        \draw[] (1.5*-3.5, 1.5*\y) to (1.5*3.5, 1.5*\y);
+    }
+    \draw[line width=0.8mm, green!50!black,->,>=latex] (0,0) to node[above,midway]{$B$} (1.5, 0);
+    \draw[line width=0.8mm, red!50!black,->,>=latex] (0,0) to node[above,midway]{$A$} (-1.5, 0);
+    \draw[black,fill=blue!50!white] (0,0) circle (2mm);
+    \node[fill=white] at (0, -0.75) {Source};
+    \draw[black,fill=red!50!white] (3*1.5,-2*1.5) circle (2mm);
+    \node[fill=white] at (3*1.5, -2.5*1.5) {Dest};
+  \end{tikzpicture}
+</script>
+<br/>
+<em>
+Fig. 4: A rectangular grid network with a source at the origin.
+</em>
+</center>
+<br/>
+
+What is the probability that a receiver located at $$(x, y)$$ receives both packets using RLNC? In theory, according to the above authors, it decreases exponentially with the [Manhattan distance][wpmanhattan] $$z = \|x + y\|$$:
+
+$$p_\text{theory} = \left( 1 - \frac1q \right)^{2(z-2)}.$$
+
+So for instance, with $$q = 8$$ and $$z = 4$$ this is about $$0.58$$. You can test it for yourself with the following (admittedly simple) simulation:
+
+```python
+# Finite field
+q = 8
+K = GF(q)
+
+# Number of packets
+npack   = 2
+
+# Format: [coeffs, src, dst]
+packetA = [vector([K(1), K(0)]), (0,0), (0,-1)]  # First packet
+packetB = [vector([K(0), K(1)]), (0,0), (0, 1)] # Second packet
+
+packets = [packetA, packetB]
+
+# Rules are:
+# - Node receiving information from one link retransmits to all 3 others
+# - Node receiving information from k >= 2 link sends a random linear combination on the 4-k others
+
+def send_packets(target, limit):
+    received = False
+    timeout = False
+    runs = 0
+
+    target_rx = []
+
+    while len(packets) > 0 and not received and not timeout:
+        incoming = {}
+        runs += 1
+
+        for p in packets:
+            combination, src, dst = p
+            # Collect all incoming packets
+            if dst in incoming.keys():
+                incoming[dst].append([src, combination])
+            else:
+                incoming[dst] = [[src, combination]]
+
+        for node in incoming.keys():
+            if target == node:
+                for _, comb in incoming[node]:
+                    target_rx.append(comb)
+
+                if len(target_rx) >= npack:
+                    M = Matrix(target_rx)
+                    if M.rank() >= npack:
+                        # We have received enough to reconstruct all packets
+                        received = True
+
+            x, y = node
+            # List of immediate neighbours
+            x1, y1 = x + 1, y
+            x2, y2 = x, y + 1
+            x3, y3 = x - 1, y
+            x4, y4 = x, y - 1
+            links = [(x1, y1), (x2, y2), (x3, y3), (x4, y4)]
+
+            number_links = len(incoming[node])
+            if number_links == 1:
+                # Retransmit identical packet on other three links
+                for link in links:
+                    src = incoming[node][0][0]
+                    if link != src:
+                        packets.append([combination, node, link])
+            elif number_links >= 2:
+                # Pick random coefficients
+                r = [K.random_element() for _ in incoming[node]]
+
+                # Collect sources and combinations
+                srcs, cmbs = [], []
+                for (src, comb) in incoming[node]:
+                    srcs.append(src)
+                    cmbs.append(comb)
+
+                # Compute a new linear combination
+                new_combi = sum(r_i * cmb_i for (r_i, cmb_i) in zip(r, cmbs))
+
+                # Send to all remaining nodes
+                for link in links:
+                    if link not in srcs:
+                        packets.append([new_combi, node, link])
+
+        if runs > limit:
+            # Too many packets sent without success
+            timeout = True
+
+    return received
+```
+
+Calling `send_packets` with a given set of coordinates (and a timeout limit) will tell you whether that target gets both packets in less than the timeout. Notice that nodes keep resending packets forever as long as they receive data in this simulation. It would be more realistic (and more efficient) to tag the packets and only communicate once. With the following modifications, we get closer to the theoretical value:
+
+> **Exercise:** modify the above code so that once a node has received/resent a packet, it becomes dormant and does not participate in the communication any more.
+
+> **Exercise:** modify the above code to answer the following, related question: at any given time, how many nodes in the network have received both packets?
+
+To make things interesting, we can drop packets at random, meaning that at every time step a packet is deleted with probability $$\eta$$. This does not impact the network too much. If we now **modify** packets with probability $$\eta$$, **the consequence is desastrous**: even for very low values of $$\eta$$, correct reconstruction probability plummets.
+
+> **Exercise:** the probability of receiving both packets with traditional routing is 1 as long as the the source is connected to $$(x, y)$$. Assuming this is the case, how much information must be stored by the nodes to perform routing? How does that quantity change as $$\eta$$ increases?
+
+# IV. Rank metric codes in RLNC
+
+How can we avoid issues caused by erroneous/malicious nodes? This is where we hit the boundary of current scientific knowledge. No single solution is known to solve all the problems, and there are several interesting approaches. Rank metric codes are maybe one piece of the puzzle, [homomorphic signatures][wphsnc] could be another -- we focus on the former in this post.
+
+Indeed, a couple of 2008 papers by [Silva, Kötter and Kschischang][skk2008] and [Kötter and Kschischang][kk2008] almost singlehandedly revived rank metric codes by showing how they help solving some network coding issues. Their key observation is that if we treat packets themselves as basis vectors, then linear combinations of packets preserve the [row space][wprs] spanned by thes vectors. In other terms, **RLNC is really trying to transmit some linear subspace**.
+
+The receiver observes some subspace which may be different, because of transmission errors, from the subspace initially sent. Perhaps if we can measure the "distance" between two such objects, we could get a notion of the "closest" subspace and correct the error in this way. Indeed, there is such a notion of linear subspace distance:
+
+$$d_S(U, V) := 2 \dim(U + V) - \dim(U) - \dim(V).$$
+
+The problem is, the [_set of subspaces_][wpgrassman] is not itself a vector space (or a module), and is therefore not amenable to the usual theory of error correcting codes. We'll remedy this shortly.
+
+Say that we represent a subspace $$U$$ by any matrix whose row space is $$U$$, and we'll more specifically consider matrices of the form $$L_c = \begin{bmatrix}I&  c \end{bmatrix}$$ where $$I$$ is the identity matrix and $$c$$ is a codeword from a rank metric code. Then we have the remarkable following observation:
+
+$$d_S(L_c) = 2 d_R(c),$$
+
+where $$d_R$$ is the rank metric. In other terms, **rank metric codes give a direct way to design subspace codes**, with the latter inheriting the nice distance properties of the former. In fact, **MRD codes are essentially optimal** as constant dimension codes. And we have efficient construction, coding and decoding of such codes! (see Parts I, II, II of this series, although [some questions remain open][ksksubspace].)
+
+> **Exercise:** prove the above equality.
+
+# V. Fitting it all together in an example
+
+Let's finish with an example of all this (based on _op. cit._ Silva, Kötter and Kschischang 2008). Let $$X$$ be an $$n \times M$$ matrix whose rows are packets $$X_1, \dotsc, X_n$$ and $$Y$$ be the received matrix. Let $$Z$$ be an $$\ell \times M$$ matrix whose rows are the _error_ packets $$Z_1, \dotsc, Z_\ell$$ (i.e., $$Z_i \neq 0$$ means that a corrupt packet was injected at link $$i$$). The sent and received matrices are related by
+
+$$Y = AX + BZ$$
+
+for $$A$$ the $$N \times n$$ matrix corresponding to the random overall linear transformation applied by the network, abd $$B$$ the $$N \times \ell$$ matrix corresponding to the random overall linear transformation applied to the errors. 
+
+Let $$n = 4, q = 5$$ and assume we sent a rank metric codeword $$x = (x_1, \dotsc, x_4)$$:
+
+$$
+\begin{align*}
+A & = 
+\begin{pmatrix}
+2 & 4 & 2 & 4 \\
+0 & 0 & 3 & 3 \\
+1 & 0 & 4 & 3 \\
+0 & 4 & 1 & 4 
+\end{pmatrix}
+&
+B & = 
+\begin{pmatrix}
+4 \\ 0 \\ 1 \\ 0
+\end{pmatrix} 
+& 
+Z & = 
+\begin{pmatrix}
+1 \\ 2 \\ 3 \\ 4 \\ z
+\end{pmatrix}^\top
+\end{align*}
+$$
+
+We then have
+
+$$
+Y = \begin{pmatrix}
+1 & 2 & 4 & 0 & 2x_1+ 4x_2+ 2x_3+ 4x_4+ 4z \\
+0 & 0 & 3 & 3 & 3x_3 + 3x_4 \\
+2 & 2 & 2 & 2 & x_1 + 4x_3 + 3x_4 + z \\
+0 & 4 & 1 & 4 & 4x_2 + x_3 + 4x_ 4
+\end{pmatrix}.
+$$
+
+Finally, writing this matrix in reduced row echelon form (which amounts to a further linear transformation of $$Y$$), we have $$\begin{bmatrix}I & r \end{bmatrix}$$ where
+
+$$
+r = \begin{pmatrix}
+3x_2 + 2x_3 + x_4 + z \\
+3x_1 + 2x_2 + 4x_3 + 2x_4 + 2z \\
+4x_1 + 3x_2 + 3x_3 + x_4 + z \\
+x_1 + 2x_2 + 3x_3 + 4z
+\end{pmatrix}
+=
+x
++
+LV
+$$
+
+with $$L = (1, 2, 1, 4)^\top$$ and $$V = 4x_1 + 3x_2 + 2x_3 + x_4 + z$$. As a result, the rank of $$r - x$$ (that is, the rank of the error) is equal to 1. We can correct it as soon as our rank metric code has minimal rank distance $$\geq 3$$. For instance, a Gabidulin code!
+
+# That's all folks
+
+This post concludes the series on rank metric codes. A lot remains to be said (and found) about these codes, but hopefully now you got enough to look for this on your own.
+
+Network coding (and RLNC in particular) raises surprisingly complex questions relating graphs to information theory to algebra and (as you just saw) coding theory. While it may be unlikely that network coding gets deployed at large scale, it may be the solution of choice in certain situations.
+
+
+_Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
+
+[wpbroadcast]: https://en.wikipedia.org/wiki/Broadcasting_(networking)
+[wpps]: https://en.wikipedia.org/wiki/Packet_switching
+[wpcs]: https://en.wikipedia.org/wiki/Circuit_switching
+[wpgeocast]: https://en.wikipedia.org/wiki/Geographic_routing
+[wpbroadvariants]: https://en.wikipedia.org/wiki/Broadcast,_unknown-unicast_and_multicast_traffic
+[wproutingmany]: https://en.wikipedia.org/wiki/List_of_ad_hoc_routing_protocols
+[wplincode]: https://en.wikipedia.org/wiki/Linear_network_coding
+[wpduplex]: https://en.wikipedia.org/wiki/Duplex_(telecommunications)
+[wpbutterfly]: https://en.wikipedia.org/wiki/Linear_network_coding#/media/File:Butterfly_network.svg
+[wpfountain]: https://en.wikipedia.org/wiki/Fountain_code
+[koettermedard]: http://www.mit.edu/~medard/page2/newpapers/04_2.pdf
+[hkmke]: https://authors.library.caltech.edu/7381/1/HOTisit03a.pdf
+[wpmanhattan]: https://en.wikipedia.org/wiki/Taxicab_geometry
+[wphsnc]: https://en.wikipedia.org/wiki/Homomorphic_signatures_for_network_coding
+[skk2008]: https://arxiv.org/abs/0711.0708
+[kk2008]: https://arxiv.org/abs/cs/0703061
+[wprs]: https://en.wikipedia.org/wiki/Row_and_column_spaces
+[wpgrassman]: https://en.wikipedia.org/wiki/Grassmannian
+[ksksubspace]: http://www.lancs.ac.uk/~khaleghi/Publications_files/subspace_1.pdf
+[coffee]: https://www.buymeacoffee.com/shargs
