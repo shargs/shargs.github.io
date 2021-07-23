@@ -2,8 +2,7 @@
 layout: post
 title:  "Rank-metric codes, Part IV: Application to random network linear coding"
 date:   2021-07-12
-categories: codes
-tags: [codes]
+categories: coding-theory
 image: 
 ---
 
@@ -361,7 +360,7 @@ Say that we represent a subspace $$U$$ by any matrix whose row space is $$U$$, a
 
 $$d_S(L_c) = 2 d_R(c),$$
 
-where $$d_R$$ is the rank metric. In other terms, **rank metric codes give a direct way to design subspace codes**, with the latter inheriting the nice distance properties of the former. In fact, **MRD codes are essentially optimal** as constant dimension codes. And we have efficient construction, coding and decoding of such codes! (see Parts I, II, II of this series, although [some questions remain open][ksksubspace].)
+where $$d_R$$ is the rank metric. In other terms, **rank metric codes give a direct way to design subspace codes**, with the latter inheriting the nice distance properties of the former. In fact, **MRD codes are essentially optimal** as constant dimension codes. And we have efficient construction, coding and decoding of such codes! (see Parts I, II, III of this series, although [some questions remain open][ksksubspace].)
 
 > **Exercise:** prove the above equality.
 
@@ -425,11 +424,16 @@ $$
 
 with $$L = (1, 2, 1, 4)^\top$$ and $$V = 4x_1 + 3x_2 + 2x_3 + x_4 + z$$. As a result, the rank of $$r - x$$ (that is, the rank of the error) is equal to 1. We can correct it as soon as our rank metric code has minimal rank distance $$\geq 3$$. For instance, a Gabidulin code!
 
-# That's all folks
+# That's all folks! What's next
 
 This post concludes the series on rank metric codes. A lot remains to be said (and found) about these codes, but hopefully now you got enough to look for this on your own.
 
 Network coding (and RLNC in particular) raises surprisingly complex questions relating graphs to information theory to algebra and (as you just saw) coding theory. While it may be unlikely that network coding gets deployed at large scale, it may be the solution of choice in certain situations.
+
+If this topic caught your interest, you may find valuable the following more advanced reading:
+
+- E. Gabidulin: [Rank metric codes](https://mediatum.ub.tum.de/doc/1601193/1601193.pdf)
+- T. Ho: [Network coding: an introduction](https://authors.library.caltech.edu/88686/1/introNetCoding.pdf)
 
 
 _Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._

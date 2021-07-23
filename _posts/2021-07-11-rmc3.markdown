@@ -2,8 +2,7 @@
 layout: post
 title:  "Rank-metric codes, Part III: Decoding Gabidulin codes"
 date:   2021-07-11
-categories: codes
-tags: [codes]
+categories: coding-theory
 image: 
 ---
 
