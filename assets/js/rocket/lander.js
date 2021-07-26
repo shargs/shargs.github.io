@@ -12,19 +12,19 @@
  * least share the original blogpost, I'd appreciate it :)
  *
  * shargs.github.io 2021
+ * Update (26/07/2021):
+ *  - Fix a bug where restarting would not stop the previous animation loop
+ *  - General style improvements
  */
 
 // General simulation parameters
-var context; // HTML5 canvas 2D context
-var spacecraft;
+let context; // HTML5 canvas 2D context
+let spacecraft;
 
-var last_time = performance.now();
-var delta_t = 0; // Time elapsed since last update
-const width = 800; // Canvas width
-const height = 600; // Canvas height
-const ppm = 48; // Pixel per meter
-const g = 1.62; // Surface gravity (m.s⁻²)
-var t = 0;
+const WIDTH = 800; // Canvas width
+const HEIGHT = 600; // Canvas height
+const PIXEL_PER_METER = 48; // Pixel per meter
+const G = 1.62; // Surface gravity (m.s⁻²)
 
 const ST_INIT = 0; // Initial state
 const ST_FLY = 1; // Flying
@@ -32,372 +32,356 @@ const ST_CRASH = 1.5; // Crashing
 const ST_CRASHED = 2; // Crashed
 const ST_LAND = 3; // Landed safely!
 
-const moon_surface = 100; // Offset
+const MOON_SURFACE = 100; // Offset
 
-var status = ST_INIT; // Current status
-var autopilot = false;
+let last_time = performance.now();
+let delta_t = 0; // Time elapsed since last update
+let t = 0;
+let status = ST_INIT; // Current status
+let autopilot = false;
 
 // Lander parameters
-const lnd_width = 128;
-const lnd_height = 108;
+const LND_WIDTH = 128;
+const LND_HEIGHT = 108;
 
-const m0 = 1500; // Initial mass (in kg)
-const mmin = 1000; // Mass without fuel (in kg)
-const Tmax = 20000; // Maximum thrust (in N)
-const k = 1 / 200; // Inverse of exhaust speed (in 1/(m.s⁻¹))
-const shock_tolerance = 5; // How much of an impact we can absorb, in m.s⁻¹
+const M0 = 1500; // Initial mass (in kg)
+const M_MIN = 1000; // Mass without fuel (in kg)
+const T_MAX = 20000; // Maximum thrust (in N)
+const K = 1 / 200; // Inverse of exhaust speed (in 1/(m.s⁻¹))
+const SHOCK_TOLERANCE = 5; // How much of an impact we can absorb, in m.s⁻¹
 
-var y = 0; // Lander altitude (in m)
-var v = 0; // Lander velocity (in m.s⁻¹)
-var m = m0; // Lander mass (in kg)
+let y = 0; // Lander altitude (in m)
+let v = 0; // Lander velocity (in m.s⁻¹)
+let m = M0; // Lander mass (in kg)
 
-var lnd_y = height / 2; // Position of the lander (screen space, in px)
-var screen_offset = 0; // Used to move the screen around
+let lnd_y = HEIGHT / 2; // Position of the lander (screen space, in px)
+let screen_offset = 0; // Used to move the screen around
 
 // Explosiion animation parameters
-const expl_width = 960;
-const expl_height = 768;
-const expl_rows = 4;
-const expl_cols = 5;
-const expl_frames = expl_cols * expl_rows;
-const expl_swidth = expl_width / expl_cols;
-const expl_sheight = expl_height / expl_rows;
-var expl_ctr = 0;
+const EXPL_WIDTH = 960;
+const EXPL_HEIGHT = 768;
+const EXPL_ROWS = 4;
+const EXPL_COLS = 5;
+const EXPL_FRAMES = EXPL_COLS * EXPL_ROWS;
+const EXPL_SWIDTH = EXPL_WIDTH / EXPL_COLS;
+const EXPL_SHEIGHT = EXPL_HEIGHT / EXPL_ROWS;
+let expl_ctr = 0;
 
 // Sprites
-var lander = new Image();
-var explosion = new Image();
-var stars = [];
+let lander = new Image();
+let explosion = new Image();
+let stars = [];
 
-var Spacecraft = function () {
-  this.canvas = document.getElementById("canvas");
-  this.ctx = this.canvas.getContext("2d");
-  this.canvas.height = 600;
-  this.canvas.width = 800;
-  this.canvas.style.background = "#000";
+let currentAnimationFrame;
 
-  this.aFires = [];
-  this.aSpark = [];
-  this.aSpark2 = [];
+class Spacecraft {
+  constructor() {
+    this.canvas = document.getElementById("canvas");
+    this.ctx = this.canvas.getContext("2d");
+    this.canvas.height = HEIGHT;
+    this.canvas.width = WIDTH;
+    this.canvas.style.background = "#000";
 
-  this.source = {
-    x: this.canvas.width * 0.5,
-    y: this.canvas.height * 0.5,
-  };
-};
+    this.aFires = [];
+    this.aSpark = [];
+    this.aSpark2 = [];
 
-Spacecraft.prototype.run = function () {
-  this.clearCanvas();
+    this.source = {
+      x: this.canvas.width * 0.5,
+      y: this.canvas.height * 0.5,
+    };
+  }
+  run() {
+    this.clearCanvas();
 
-  updateScreen();
+    updateScreen();
 
-  drawStars();
-  drawMoon();
-  drawLander();
-  drawInfo();
+    drawStars();
+    drawMoon();
+    drawLander();
+    drawInfo();
 
-  if (state == ST_FLY) {
-    this.updateThrusters();
-    updatePhysics();
-    if (this.thrusters_active) {
-      // Thrusters active
-      this.drawFlames();
+    if (state === ST_FLY) {
+      this.updateThrusters();
+      updatePhysics();
+      if (this.thrusters_active) {
+        // Thrusters active
+        this.drawFlames();
+      }
+    } else if (state === ST_CRASH) {
+      updateExplosion();
+      drawExplosion();
+    } else if (state === ST_CRASHED) {
+      drawCrashedPanel();
+    } else if (state === ST_LAND) {
+      drawLandedPanel();
     }
-  } else if (state == ST_CRASH) {
-    updateExplosion();
-    drawExplosion();
-  } else if (state == ST_CRASHED) {
-    drawCrashedPanel();
-  } else if (state == ST_LAND) {
-    drawLandedPanel();
+
+    // Compute render time
+    const NOW = performance.now();
+    delta_t = NOW - last_time;
+    last_time = NOW;
+
+    currentAnimationFrame = requestAnimationFrame(() => this.run());
   }
-
-  // Compute render time
-  delta_t = performance.now() - last_time;
-  last_time = performance.now();
-
-  requestAnimationFrame(this.run.bind(this));
-};
-
-Spacecraft.prototype.start = function () {
-  this.run();
-};
-
-Spacecraft.prototype.updateThrusters = function () {
-  this.aFires.push(new Flame(this.source));
-  this.aSpark.push(new Spark(this.source));
-  this.aSpark2.push(new Spark(this.source));
-
-  for (var i = this.aFires.length - 1; i >= 0; i--) {
-    if (this.aFires[i].alive) this.aFires[i].update();
-    else this.aFires.splice(i, 1);
+  start() {
+    // clear previous loop
+    if (currentAnimationFrame) {
+      cancelAnimationFrame(currentAnimationFrame);
+    }
+    this.run();
   }
+  updateThrusters() {
+    this.aFires.push(new Flame(this.source));
+    this.aSpark.push(new Spark(this.source));
+    this.aSpark2.push(new Spark(this.source));
 
-  for (var i = this.aSpark.length - 1; i >= 0; i--) {
-    if (this.aSpark[i].alive) this.aSpark[i].update();
-    else this.aSpark.splice(i, 1);
+    for (let i = this.aFires.length - 1; i >= 0; i--) {
+      if (this.aFires[i].alive) this.aFires[i].update();
+      else this.aFires.splice(i, 1);
+    }
+
+    for (let i = this.aSpark.length - 1; i >= 0; i--) {
+      if (this.aSpark[i].alive) this.aSpark[i].update();
+      else this.aSpark.splice(i, 1);
+    }
+
+    for (let i = this.aSpark2.length - 1; i >= 0; i--) {
+      if (this.aSpark2[i].alive) this.aSpark2[i].update();
+      else this.aSpark2.splice(i, 1);
+    }
   }
+  drawFlames() {
+    this.ctx.globalCompositeOperation = "overlay";
 
-  for (var i = this.aSpark2.length - 1; i >= 0; i--) {
-    if (this.aSpark2[i].alive) this.aSpark2[i].update();
-    else this.aSpark2.splice(i, 1);
+    for (let i = this.aFires.length - 1; i >= 0; i--) {
+      this.aFires[i].draw(this.ctx);
+    }
+
+    this.ctx.globalCompositeOperation = "soft-light";
+
+    for (let i = this.aSpark.length - 1; i >= 0; i--) {
+      if (i % 2 === 0) this.aSpark[i].draw(this.ctx);
+    }
+
+    this.ctx.globalCompositeOperation = "color-dodge";
+
+    for (let i = this.aSpark2.length - 1; i >= 0; i--) {
+      this.aSpark2[i].draw(this.ctx);
+    }
   }
-};
+  clearCanvas() {
+    this.ctx.globalCompositeOperation = "source-over";
+    this.ctx.fillStyle = "rgba( 5, 5, 2, 1 )";
+    this.ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
 
-Spacecraft.prototype.drawFlames = function () {
-  this.ctx.globalCompositeOperation = "overlay";
-
-  for (var i = this.aFires.length - 1; i >= 0; i--) {
-    this.aFires[i].draw(this.ctx);
+    this.ctx.globalCompositeOperation = "lighter";
+    this.ctx.rect(0, 0, this.canvas.width, this.canvas.height);
+    this.ctx.fillStyle = this.pattern;
+    this.ctx.fill();
   }
+}
 
-  this.ctx.globalCompositeOperation = "soft-light";
-
-  for (var i = this.aSpark.length - 1; i >= 0; i--) {
-    if (i % 2 === 0) this.aSpark[i].draw(this.ctx);
+class Flame {
+  constructor(mouse) {
+    this.cx = mouse.x;
+    this.cy = mouse.y;
+    this.x = rand(this.cx - 25, this.cx + 25);
+    this.y = rand(this.cy - 5, this.cy + 5);
+    this.lx = this.x;
+    this.ly = this.y;
+    this.vy = rand(1, 3);
+    this.vx = rand(-1, 1);
+    this.r = rand(30, 40);
+    this.life = rand(2, 7);
+    this.alive = true;
+    this.c = {
+      h: Math.floor(rand(2, 40)),
+      s: 100,
+      l: rand(80, 100),
+      a: 0,
+      ta: rand(0.8, 0.9),
+    };
   }
+  update() {
+    this.lx = this.x;
+    this.ly = this.y;
 
-  this.ctx.globalCompositeOperation = "color-dodge";
+    this.y += this.vy;
+    this.vy += 0.08;
 
-  for (var i = this.aSpark2.length - 1; i >= 0; i--) {
-    this.aSpark2[i].draw(this.ctx);
+    this.x += this.vx;
+
+    if (this.x < this.cx) this.vx += 0.2;
+    else this.vx -= 0.2;
+
+    if (this.r > 0) this.r -= 0.3;
+
+    if (this.r <= 0) this.r = 0;
+
+    this.life -= 0.12;
+
+    if (this.life <= 0) {
+      this.c.a -= 0.05;
+      if (this.c.a <= 0) this.alive = false;
+    } else if (this.life > 0 && this.c.a < this.c.ta) {
+      this.c.a += 0.08;
+    }
   }
-};
+  draw(ctx) {
+    this.grd1 = ctx.createRadialGradient(
+      this.x,
+      this.y,
+      this.r * 3,
+      this.x,
+      this.y,
+      0
+    );
+    this.grd1.addColorStop(
+      0.5,
+      `hsla( ${this.c.h}, ${this.c.s}%, ${this.c.l}%, ${this.c.a / 20})`
+    );
+    this.grd1.addColorStop(0, "transparent");
 
-Spacecraft.prototype.clearCanvas = function () {
-  this.ctx.globalCompositeOperation = "source-over";
-  this.ctx.fillStyle = "rgba( 5, 5, 2, 1 )";
-  this.ctx.fillRect(0, 0, window.innerWidth, window.innerHeight);
+    this.grd2 = ctx.createRadialGradient(
+      this.x,
+      this.y,
+      this.r,
+      this.x,
+      this.y,
+      0
+    );
+    this.grd2.addColorStop(
+      0.5,
+      `hsla( ${this.c.h}, ${this.c.s}%, ${this.c.l}%, ${this.c.a})`
+    );
+    this.grd2.addColorStop(0, "transparent");
 
-  this.ctx.globalCompositeOperation = "lighter";
-  this.ctx.rect(0, 0, this.canvas.width, this.canvas.height);
-  this.ctx.fillStyle = this.pattern;
-  this.ctx.fill();
-};
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r * 3, 0, 2 * Math.PI);
+    ctx.fillStyle = this.grd1;
+    ctx.fill();
 
-var Flame = function (mouse) {
-  this.cx = mouse.x;
-  this.cy = mouse.y;
-  this.x = rand(this.cx - 25, this.cx + 25);
-  this.y = rand(this.cy - 5, this.cy + 5);
-  this.lx = this.x;
-  this.ly = this.y;
-  this.vy = rand(1, 3);
-  this.vx = rand(-1, 1);
-  this.r = rand(30, 40);
-  this.life = rand(2, 7);
-  this.alive = true;
-  this.c = {
-    h: Math.floor(rand(2, 40)),
-    s: 100,
-    l: rand(80, 100),
-    a: 0,
-    ta: rand(0.8, 0.9),
-  };
-};
+    ctx.globalCompositeOperation = "overlay";
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.r, 0, 2 * Math.PI);
+    ctx.fillStyle = this.grd2;
+    ctx.fill();
 
-Flame.prototype.update = function () {
-  this.lx = this.x;
-  this.ly = this.y;
-
-  this.y += this.vy;
-  this.vy += 0.08;
-
-  this.x += this.vx;
-
-  if (this.x < this.cx) this.vx += 0.2;
-  else this.vx -= 0.2;
-
-  if (this.r > 0) this.r -= 0.3;
-
-  if (this.r <= 0) this.r = 0;
-
-  this.life -= 0.12;
-
-  if (this.life <= 0) {
-    this.c.a -= 0.05;
-    if (this.c.a <= 0) this.alive = false;
-  } else if (this.life > 0 && this.c.a < this.c.ta) {
-    this.c.a += 0.08;
+    ctx.beginPath();
+    ctx.moveTo(this.lx, this.ly);
+    ctx.lineTo(this.x, this.y);
+    ctx.strokeStyle = `hsla( ${this.c.h}, ${this.c.s}%, ${this.c.l}%, 1)`;
+    ctx.lineWidth = rand(1, 2);
+    ctx.stroke();
+    ctx.closePath();
   }
-};
-Flame.prototype.draw = function (ctx) {
-  this.grd1 = ctx.createRadialGradient(
-    this.x,
-    this.y,
-    this.r * 3,
-    this.x,
-    this.y,
-    0
-  );
-  this.grd1.addColorStop(
-    0.5,
-    "hsla( " +
+}
+
+class Spark {
+  constructor(mouse) {
+    this.cx = mouse.x;
+    this.cy = mouse.y;
+    this.x = rand(this.cx - 40, this.cx + 40);
+    this.y = rand(this.cy, this.cy + 5);
+    this.lx = this.x;
+    this.ly = this.y;
+    this.vy = rand(1, 3);
+    this.vx = rand(-4, 4);
+    this.r = rand(0, 1);
+    this.life = rand(4, 8);
+    this.alive = true;
+    this.c = {
+      h: Math.floor(rand(2, 40)),
+      s: 100,
+      l: rand(40, 100),
+      a: rand(0.8, 0.9),
+    };
+  }
+  update() {
+    this.lx = this.x;
+    this.ly = this.y;
+
+    this.y += this.vy;
+    this.x += this.vx;
+
+    if (this.x < this.cx) this.vx += 0.2;
+    else this.vx -= 0.2;
+
+    this.vy += 0.08;
+    this.life -= 0.1;
+
+    if (this.life <= 0) {
+      this.c.a -= 0.05;
+
+      if (this.c.a <= 0) this.alive = false;
+    }
+  }
+  draw(ctx) {
+    ctx.beginPath();
+    ctx.moveTo(this.lx, this.ly);
+    ctx.lineTo(this.x, this.y);
+    ctx.strokeStyle =
+      "hsla( " +
       this.c.h +
       ", " +
       this.c.s +
       "%, " +
       this.c.l +
       "%, " +
-      this.c.a / 20 +
-      ")"
-  );
-  this.grd1.addColorStop(0, "transparent");
+      this.c.a / 2 +
+      ")";
+    ctx.lineWidth = this.r * 2;
+    ctx.lineCap = "round";
+    ctx.stroke();
+    ctx.closePath();
 
-  this.grd2 = ctx.createRadialGradient(
-    this.x,
-    this.y,
-    this.r,
-    this.x,
-    this.y,
-    0
-  );
-  this.grd2.addColorStop(
-    0.5,
-    "hsla( " +
-      this.c.h +
-      ", " +
-      this.c.s +
-      "%, " +
-      this.c.l +
-      "%, " +
-      this.c.a +
-      ")"
-  );
-  this.grd2.addColorStop(0, "transparent");
-
-  ctx.beginPath();
-  ctx.arc(this.x, this.y, this.r * 3, 0, 2 * Math.PI);
-  ctx.fillStyle = this.grd1;
-  ctx.fill();
-
-  ctx.globalCompositeOperation = "overlay";
-  ctx.beginPath();
-  ctx.arc(this.x, this.y, this.r, 0, 2 * Math.PI);
-  ctx.fillStyle = this.grd2;
-  ctx.fill();
-
-  ctx.beginPath();
-  ctx.moveTo(this.lx, this.ly);
-  ctx.lineTo(this.x, this.y);
-  ctx.strokeStyle =
-    "hsla( " + this.c.h + ", " + this.c.s + "%, " + this.c.l + "%, 1)";
-  ctx.lineWidth = rand(1, 2);
-  ctx.stroke();
-  ctx.closePath();
-};
-
-var Spark = function (mouse) {
-  this.cx = mouse.x;
-  this.cy = mouse.y;
-  this.x = rand(this.cx - 40, this.cx + 40);
-  this.y = rand(this.cy, this.cy + 5);
-  this.lx = this.x;
-  this.ly = this.y;
-  this.vy = rand(1, 3);
-  this.vx = rand(-4, 4);
-  this.r = rand(0, 1);
-  this.life = rand(4, 8);
-  this.alive = true;
-  this.c = {
-    h: Math.floor(rand(2, 40)),
-    s: 100,
-    l: rand(40, 100),
-    a: rand(0.8, 0.9),
-  };
-};
-
-Spark.prototype.update = function () {
-  this.lx = this.x;
-  this.ly = this.y;
-
-  this.y += this.vy;
-  this.x += this.vx;
-
-  if (this.x < this.cx) this.vx += 0.2;
-  else this.vx -= 0.2;
-
-  this.vy += 0.08;
-  this.life -= 0.1;
-
-  if (this.life <= 0) {
-    this.c.a -= 0.05;
-
-    if (this.c.a <= 0) this.alive = false;
+    ctx.beginPath();
+    ctx.moveTo(this.lx, this.ly);
+    ctx.lineTo(this.x, this.y);
+    ctx.strokeStyle = `hsla( ${this.c.h}, ${this.c.s}%, ${this.c.l}%, ${this.c.a})`;
+    ctx.lineWidth = this.r;
+    ctx.stroke();
+    ctx.closePath();
   }
-};
-Spark.prototype.draw = function (ctx) {
-  ctx.beginPath();
-  ctx.moveTo(this.lx, this.ly);
-  ctx.lineTo(this.x, this.y);
-  ctx.strokeStyle =
-    "hsla( " +
-    this.c.h +
-    ", " +
-    this.c.s +
-    "%, " +
-    this.c.l +
-    "%, " +
-    this.c.a / 2 +
-    ")";
-  ctx.lineWidth = this.r * 2;
-  ctx.lineCap = "round";
-  ctx.stroke();
-  ctx.closePath();
+}
 
-  ctx.beginPath();
-  ctx.moveTo(this.lx, this.ly);
-  ctx.lineTo(this.x, this.y);
-  ctx.strokeStyle =
-    "hsla( " +
-    this.c.h +
-    ", " +
-    this.c.s +
-    "%, " +
-    this.c.l +
-    "%, " +
-    this.c.a +
-    ")";
-  ctx.lineWidth = this.r;
-  ctx.stroke();
-  ctx.closePath();
-};
-
-rand = function (min, max) {
+function rand(min, max) {
   return Math.random() * (max - min) + min;
-};
+}
 
-drawLander = function () {
+function drawLander() {
   context.globalCompositeOperation = "source-over";
-  context.drawImage(lander, width / 2 - lnd_width / 2, lnd_y - lnd_height);
-};
-drawMoon = function () {
-  const ymoon = height - moon_surface + screen_offset;
+  context.drawImage(lander, WIDTH / 2 - LND_WIDTH / 2, lnd_y - LND_HEIGHT);
+}
 
-  if (ymoon > height) {
+function drawMoon() {
+  const Y_MOON = HEIGHT - MOON_SURFACE + screen_offset;
+
+  if (Y_MOON > HEIGHT) {
     return;
   }
 
   context.globalCompositeOperation = "lighten";
   context.fillStyle = "#ccc";
-  context.fillRect(0, ymoon, width, moon_surface);
-};
+  context.fillRect(0, Y_MOON, WIDTH, MOON_SURFACE);
+}
 
-drawStars = function () {
+function drawStars() {
   context.save();
-  const nstars = stars.length;
-  for (var i = 0; i < nstars; ++i) {
-    var star = stars[i];
+  const NSTARS = stars.length;
+  for (let i = 0; i < NSTARS; ++i) {
+    let star = stars[i];
     context.beginPath();
     context.arc(
       star.x,
-      (star.y + screen_offset) % height,
+      (star.y + screen_offset) % HEIGHT,
       star.radius,
       0,
       2 * Math.PI
     );
     context.closePath();
-    context.fillStyle = "rgba(255, 255, 255, " + star.alpha + ")";
+    context.fillStyle = `rgba(255, 255, 255, ${star.alpha})`;
     if (star.decreasing == true) {
       star.alpha -= star.dRatio;
       if (star.alpha < 0.1) {
@@ -412,28 +396,28 @@ drawStars = function () {
     context.fill();
   }
   context.restore();
-};
+}
 
-const drawText = function (txt, x, y) {
+function drawText(txt, x, y) {
   // Renders text txt at position (x, y)
 
   context.fillText(txt, x, y);
-};
+}
 
-drawInfo = function () {
+function drawInfo() {
   context.save();
   context.fillStyle = "#fff";
   context.font = "11pt sans";
 
   drawText("T: toggle thrusters, R: restart, F: autopilot", 12, 24);
 
-  drawText("Altitude: " + y.toFixed(2) + " m", 12, 48);
+  drawText(`Altitude: ${y.toFixed(2)} m`, 12, 48);
 
-  drawText("Velocity: " + v.toFixed(2) + " m.s⁻¹", 12, 72);
+  drawText(`Velocity: ${v.toFixed(2)} m.s⁻¹`, 12, 72);
 
-  drawText("Fuel: " + (m - mmin).toFixed(2) + " kg", 12, 96);
+  drawText(`Fuel:  ${(m - M_MIN).toFixed(2)} kg`, 12, 96);
 
-  drawText("Mission time: " + t.toFixed(2) + " s", 12, 120);
+  drawText(`Mission time: ${t.toFixed(2)} s`, 12, 120);
 
   if (autopilot) {
     context.fillStyle = "#0f0";
@@ -441,35 +425,35 @@ drawInfo = function () {
   }
 
   context.restore();
-};
+}
 
-drawExplosion = function () {
-  const nframe = Math.floor(expl_ctr) % expl_frames;
-  const nrow = nframe % expl_cols;
-  const ncol = Math.floor(nframe / expl_cols);
+function drawExplosion() {
+  const NFRAME = Math.floor(expl_ctr) % EXPL_FRAMES;
+  const N_ROW = NFRAME % EXPL_COLS;
+  const N_COL = Math.floor(NFRAME / EXPL_COLS);
 
-  const nx = nrow * expl_swidth;
-  const ny = ncol * expl_sheight;
+  const NX = N_ROW * EXPL_SWIDTH;
+  const NY = N_COL * EXPL_SHEIGHT;
 
   context.globalCompositeOperation = "lighter";
   context.drawImage(
     explosion,
-    nx,
-    ny,
-    expl_swidth,
-    expl_sheight,
-    width / 2 - expl_swidth / 2,
-    lnd_y - expl_sheight / 2,
-    expl_swidth,
-    expl_sheight
+    NX,
+    NY,
+    EXPL_SWIDTH,
+    EXPL_SHEIGHT,
+    WIDTH / 2 - EXPL_SWIDTH / 2,
+    lnd_y - EXPL_SHEIGHT / 2,
+    EXPL_SWIDTH,
+    EXPL_SHEIGHT
   );
-};
+}
 
-drawPanel = function (col) {
+function drawPanel(col) {
   // Draws a fancy info panel
 
-  const bevel = 32;
-  const padding = 64;
+  const BEVEL = 32;
+  const PADDING = 64;
 
   context.save();
 
@@ -480,14 +464,14 @@ drawPanel = function (col) {
   context.shadowBlur = 5;
 
   context.beginPath();
-  context.moveTo(padding + bevel, padding);
-  context.lineTo(width - padding - bevel, padding);
-  context.lineTo(width - padding, padding + bevel);
-  context.lineTo(width - padding, height - padding - bevel);
-  context.lineTo(width - padding - bevel, height - padding);
-  context.lineTo(padding + bevel, height - padding);
-  context.lineTo(padding, height - padding - bevel);
-  context.lineTo(padding, padding + bevel);
+  context.moveTo(PADDING + BEVEL, PADDING);
+  context.lineTo(WIDTH - PADDING - BEVEL, PADDING);
+  context.lineTo(WIDTH - PADDING, PADDING + BEVEL);
+  context.lineTo(WIDTH - PADDING, HEIGHT - PADDING - BEVEL);
+  context.lineTo(WIDTH - PADDING - BEVEL, HEIGHT - PADDING);
+  context.lineTo(PADDING + BEVEL, HEIGHT - PADDING);
+  context.lineTo(PADDING, HEIGHT - PADDING - BEVEL);
+  context.lineTo(PADDING, PADDING + BEVEL);
   context.closePath();
 
   context.fill();
@@ -497,9 +481,9 @@ drawPanel = function (col) {
   context.stroke();
 
   context.restore();
-};
+}
 
-drawCrashedPanel = function () {
+function drawCrashedPanel() {
   // Displayed after the player has crashed
 
   drawPanel("#d69");
@@ -512,31 +496,31 @@ drawCrashedPanel = function () {
   context.font = "bold 20pt sans";
 
   context.textAlign = "center";
-  drawText("YOU HAVE CRASHED", width / 2, 128);
+  drawText("YOU HAVE CRASHED", WIDTH / 2, 128);
 
   context.fillStyle = "#d69";
   context.font = "11pt sans";
-  drawText("Your vehicle hurled too fast towards the moon...", width / 2, 150);
+  drawText("Your vehicle hurled too fast towards the moon...", WIDTH / 2, 150);
 
   context.font = "bold 14pt sans";
-  drawText("- PRESS [R] TO RESTART THE SIMULATION- ", width / 2, height - 128);
+  drawText("- PRESS [R] TO RESTART THE SIMULATION- ", WIDTH / 2, HEIGHT - 128);
 
   context.font = "11pt sans";
   context.textAlign = "left";
   context.fillStyle = "#fff";
 
-  const energy = (m * v * v) / 2000;
+  const ENERGY = (m * v * v) / 2000;
 
-  drawText("Final velocity: " + v.toFixed(2) + " m.s⁻¹", 128, 200);
-  drawText("Remaining fuel: " + (m - mmin).toFixed(2) + " kg", 128, 224);
-  drawText("Total mass: " + m.toFixed(2) + " kg", 128, 248);
-  drawText("Impact energy : " + energy.toFixed(2) + " kJ", 128, 272);
-  drawText("Mission duration : " + t.toFixed(2) + " s", 128, 296);
+  drawText(`Final velocity: ${v.toFixed(2)} m.s⁻¹`, 128, 200);
+  drawText(`Remaining fuel: ${(m - M_MIN).toFixed(2)} kg`, 128, 224);
+  drawText(`Final velocity: ${v.toFixed(2)} m.s⁻¹`, 128, 200);
+  drawText(`Impact energy : ${ENERGY.toFixed(2)} kJ`, 128, 272);
+  drawText(`Mission duration : ${t.toFixed(2)} s`, 128, 296);
 
   context.restore();
-};
+}
 
-drawLandedPanel = function () {
+function drawLandedPanel() {
   // Displayed after the player has landed
 
   drawPanel("#69d");
@@ -549,67 +533,67 @@ drawLandedPanel = function () {
   context.font = "bold 20pt sans";
 
   context.textAlign = "center";
-  drawText("YOU HAVE LANDED SAFELY", width / 2, 128);
+  drawText("YOU HAVE LANDED SAFELY", WIDTH / 2, 128);
 
   context.fillStyle = "#69d";
   context.font = "11pt sans";
-  drawText("The vehicle sits nicely at the surface", width / 2, 150);
+  drawText("The vehicle sits nicely at the surface", WIDTH / 2, 150);
 
   context.font = "bold 14pt sans";
-  drawText("- PRESS [R] TO RESTART THE SIMULATION- ", width / 2, height - 128);
+  drawText("- PRESS [R] TO RESTART THE SIMULATION- ", WIDTH / 2, HEIGHT - 128);
 
   context.font = "11pt sans";
   context.textAlign = "left";
   context.fillStyle = "#fff";
 
-  const energy = (m * v * v) / 2000;
+  const ENERGY = (m * v * v) / 2000;
 
-  drawText("Final velocity: " + v.toFixed(2) + " m.s⁻¹", 128, 200);
-  drawText("Remaining fuel: " + (m - mmin).toFixed(2) + " kg", 128, 224);
-  drawText("Total mass: " + m.toFixed(2) + " kg", 128, 248);
-  drawText("Impact energy : " + energy.toFixed(2) + " kJ", 128, 272);
-  drawText("Mission duration : " + t.toFixed(2) + " s", 128, 296);
+  drawText(`Final velocity: ${v.toFixed(2)} m.s⁻¹`, 128, 200);
+  drawText(`Remaining fuel: ${(m - M_MIN).toFixed(2)} kg`, 128, 224);
+  drawText(`Final velocity: ${v.toFixed(2)} m.s⁻¹`, 128, 200);
+  drawText(`Impact energy : ${ENERGY.toFixed(2)} kJ`, 128, 272);
+  drawText(`Mission duration : ${t.toFixed(2)} s`, 128, 296);
 
   context.restore();
-};
+}
 
-updateScreen = function () {
+function updateScreen() {
   // Convert y into lnd_y
   // Adjust screen_offset
 
-  lnd_y = height - moon_surface - y * ppm;
+  lnd_y = HEIGHT - MOON_SURFACE - y * PIXEL_PER_METER;
 
-  if (lnd_y > height / 2) {
+  if (lnd_y > HEIGHT / 2) {
     // We are very close to the surface
     screen_offset = 0;
   } else {
     // We are up in the air
-    screen_offset = height / 2 - lnd_y;
-    lnd_y = height / 2;
+    screen_offset = HEIGHT / 2 - lnd_y;
+    lnd_y = HEIGHT / 2;
   }
 
   spacecraft.source.y = lnd_y;
-};
+}
 
-updateExplosion = function () {
+function updateExplosion() {
   expl_ctr += delta_t / 50;
 
-  if (expl_ctr > expl_frames) {
+  if (expl_ctr > EXPL_FRAMES) {
     // End of animation
-    expl_ctr = expl_frames - 1;
+    expl_ctr = EXPL_FRAMES - 1;
     state = ST_CRASHED;
   }
-};
+}
 
-updatePhysics = function () {
+function updatePhysics() {
   // Simple explicit forward Euler
   // Not the most accurate, but hey this is a game
 
-  const dt = delta_t / 1000;
-  t += dt;
+  const DT = delta_t / 1000;
+  t += DT;
 
   // Acceleration
-  a = -g;
+  a = -G;
 
   if (autopilot) {
     updateAutopilot();
@@ -618,58 +602,53 @@ updatePhysics = function () {
   if (spacecraft.thrusters_active) {
     // Use thrusters
 
-    if (m > mmin) {
+    if (m > M_MIN) {
       // Consume fuel
-      m -= k * Tmax * dt;
+      m -= K * T_MAX * DT;
 
       // Exert thrust
-      a += Tmax / m;
+      a += T_MAX / m;
     } else {
       // No more fuel
       spacecraft.thrusters_active = false;
-      m = mmin;
+      m = M_MIN;
     }
   }
 
-  y += v * dt;
-  v += a * dt;
+  y += v * DT;
+  v += a * DT;
 
   if (y < 0 && v < 0) {
     // Hitting the surface
 
-    if (v + shock_tolerance >= 0) {
+    if (v + SHOCK_TOLERANCE >= 0) {
       // Not too fast...
       state = ST_LAND;
-      console.log("Land");
-      console.log("v = " + v);
     } else {
       // Too fast!
       state = ST_CRASH;
-      console.log("crash");
-      console.log("v = " + v);
     }
 
     y = 0;
-    // v = 0;
   }
-};
+}
 
-updateAutopilot = function () {
-  if (y < 14.78) {
+function updateAutopilot() {
+  if (y < 15) {
     spacecraft.thrusters_active = true;
   } else {
     spacecraft.thrusters_active = false;
   }
-};
+}
 
-initFire = function () {
+function initFire() {
   spacecraft = new Spacecraft();
   spacecraft.start();
   spacecraft.thrusters_active = false;
-};
+}
 
-initSimulation = function () {
-  for (var i = 0; i < 100; i++) {
+function initSimulation() {
+  for (let i = 0; i < 100; ++i) {
     stars[i] = {
       x: Math.random() * canvas.width,
       y: Math.random() * canvas.height,
@@ -684,26 +663,26 @@ initSimulation = function () {
   y = 100;
   v = -10;
   t = 0;
-  m = m0;
+  m = M0;
   state = ST_FLY;
   expl_ctr = 0;
   autopilot = false;
 
   initFire();
-};
+}
 
-window.onload = function () {
+window.onload = () => {
   // Triggered when the window is first rendered
 
-  const canvas = document.getElementById("canvas");
-  context = canvas.getContext("2d");
+  const CANVAS = document.getElementById("canvas");
+  context = CANVAS.getContext("2d");
 
-  canvas.width = width;
-  canvas.height = height;
-  canvas.style.position = "relative";
-  canvas.style.background = "#ccc";
-  canvas.style.display = "block";
-  canvas.style.margin = "0 auto";
+  CANVAS.width = WIDTH;
+  CANVAS.height = HEIGHT;
+  CANVAS.style.position = "relative";
+  CANVAS.style.background = "#ccc";
+  CANVAS.style.display = "block";
+  CANVAS.style.margin = "0 auto";
 
   context.font = "12pt serif";
 
@@ -713,16 +692,16 @@ window.onload = function () {
   initSimulation();
 };
 
-const keypress = function (e) {
+const keypress = (e) => {
   // Keypress handling
 
-  if (e.code == "KeyT") {
+  if (e.key === "t") {
     // T: toggle thrusters
     spacecraft.thrusters_active = !spacecraft.thrusters_active;
-  } else if (e.code == "KeyR") {
+  } else if (e.key === "r") {
     // R: restart the simulation
     initSimulation();
-  } else if (e.code == "KeyF") {
+  } else if (e.key === "f") {
     // F: toggle autopilot
     autopilot = !autopilot;
   }
