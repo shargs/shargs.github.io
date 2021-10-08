@@ -67,7 +67,7 @@ Our goal is to extract this distribution and use it to decompress the Huffman we
 
 According to the spec,
 
-- The first four bits in the stream determine `accuracy`
+- The first four bits in the stream determine `accuracy` --- there'll be `1 << accuracy` symbols at the end of this process
 - Then weight for symbol 0 is stored, then weight for symbol 1, etc.
 
 Let's have a look at our bitstream:
@@ -100,7 +100,7 @@ After that, it should be the tANS/FSE stream. Should be.
 
 Using the distribution we build a table and look for the initial state, which should be given by the 5 first bits. Thats **not** `00000`: remember we read tANS/FSE streams in reverse!
 
-> I'm reagining some confidence here. This is _reasonable_. I have no way to test for now but I think we have the tANS/FSE distribution right! And that means we should have the right decoding table. On we go!
+> I'm regaining some confidence here. This is _reasonable_. I have no way to test for now but I think we have the tANS/FSE distribution right! And that means we should have the right decoding table. On we go!
 
 # Decompressing weights
 
