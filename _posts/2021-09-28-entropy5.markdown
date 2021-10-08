@@ -1,0 +1,765 @@
+---
+layout: post
+title: "Writing ourselves an Zstandard codec in Rust. Part V."
+date: 2021-09-28
+categories: data-compression
+description: In this post series, we attempt to write an Zstandard codec.
+---
+
+> _**Disclaimer:** this is not final. If you find mistakes, please report them._
+
+# Part V: Decoding sequences
+
+This post is part of a series on entropy coding and writing our own Zstandard library in Rust.
+
+**Part**
+[I]({% post_url 2021-09-16-entropy1 %}) ·
+[II]({% post_url 2021-09-19-entropy2 %}) ·
+[III]({% post_url 2021-09-22-entropy3 %}) ·
+[IV]({% post_url 2021-09-24-entropy4 %}) ·
+[V]({% post_url 2021-09-28-entropy5 %})
+[VI]({% post_url 2021-10-04-entropy6 %})
+
+Welcome back to the series. In the previous episode we discussed how tANS/FSE coding could beat Huffman coding by issuing _fewer than a bit per symbol_. We saw that all this could be implemented efficiently provided we have a decoding table at hand, which tells us all about states and their transitions, and we found how to turn weights into such a table.
+
+But our code, which worked, was a Python script. We need to make it into a _real little boy_.
+
+# Building the table from weights
+
+We'll essentially follow in the footsteps of our Python implementation from last time (see [Part IV]({% post_url 2021-09-24-entropy4 %})) and then try to Rust-ify it.
+
+The process is simple, so let's recall how this works:
+
+- We have `1 << accuracy` states, where `accuracy` is a given integer
+- Symbols with special weight -1 are placed at the end of the table, they have full length (i.e., `nb_bits = accuracy`) and their `baseline` is zero
+- All other symbols are placed in the table, as many times as their weight. Their `nb_bits` is how many bits we need to tell them apart, which depends on `accuracy` and `weight`, and their `baseline` is a cumulated sum of `1 << nb_bits` across the several copies of the symbol in the table.
+- The copies of a given symbol are not placed in the table next to one another: on the contrary we attempt to scatter them as uniformly as possible. Zstandard mandates one way of doing this, but (in theory at least) any consistent method would work.
+
+> Duda suggests to scatter states according to some cryptographic RNG. In that case you would need the RNG's seed to generate a valid table. Is it a secure way to encrypt compressed data? I honestly don't know and I haven't found serious research on this particular method. I wouldn't recommend considering this approach a secure encryption unless it has undergone some extended scrutiny.
+
+Ok, so, in Rust:
+
+```rust
+// File: zrs/zarc/src/fse.rs
+
+// ...
+
+#[derive(Clone, Debug)]
+pub struct State {
+    symbol: u8,
+    nb_bits: u8,
+    baseline: usize
+}
+
+pub struct DTable {
+    pub table: Vec<State>
+}
+
+impl DTable {
+    pub fn from_weights(weights: &[i16], accuracy: u8) -> Self {
+        // Allocate table
+        let table_size = 1 << accuracy;
+        let mut table = vec![
+            State {
+                symbol: 0,
+                nb_bits: 0,
+                baseline: 0
+            };
+            table_size
+        ];
+
+        // Deal with -1 weights
+        let mut last_pos = table_size - 1;
+        for (symbol, &weight) in weights.iter().enumerate() {
+            if weight == -1 {
+                table[last_pos as usize] = State {
+                    symbol: symbol as u8,
+                    nb_bits: accuracy,
+                    baseline: 0,
+                };
+                last_pos -= 1;
+            }
+        }
+
+        // Deal with the rest
+        let mut table_position = 0;
+        for (symbol, &weight) in weights.iter().enumerate() {
+            if weight < 1 {
+                continue;
+            }
+
+            // Attribute as many cells as weight to this symbol
+            let mut repetitions = 0;
+            let mut positions = vec![];
+
+            while repetitions < weight {
+                if table_position <= last_pos {
+                    positions.push(table_position);
+                    repetitions += 1;
+                }
+
+                // Update position
+                table_position += (table_size >> 1) + (table_size >> 3) + 3;
+                table_position &= table_size - 1;
+            }
+
+            // Compute nb_bits
+            positions.sort();
+
+            // Harmless type conversion
+            let weight = weight as u64;
+            let symbol = symbol as u8;
+
+            let next_pow2 = weight.next_power_of_two();
+            let weight_log = next_pow2.trailing_zeros() as u8;
+            let count_double = (next_pow2 - weight) as usize;
+            let base_bits = accuracy - weight_log;
+
+            for (i, &position) in positions.iter().enumerate() {
+                let nb_bits = base_bits + if i < count_double { 1 } else { 0 };
+                table[position].symbol = symbol;
+                table[position].nb_bits = nb_bits;
+            }
+
+            // Compute baseline
+            let mut baseline = 0;
+            let position = count_double as u64;
+            for k in 0..weight {
+                let actual_position = ((position + k) % weight) as usize;
+                table[positions[actual_position]].baseline = baseline;
+                baseline += 1 << table[positions[actual_position]].nb_bits;
+            }
+        }
+
+        Self { table }
+    }
+}
+```
+
+It is a faithful translation of our Python code, except for the integer type casts and the use of existing integer functions to determine the next power of two. The only clever thing going on is how we detect positions already occupied by special weights: they simply are the ones beyond `last_pos`.
+
+There are a lot of `pub` here, more than we really need in the end. This is just to test things out while debugging. But I won't lie, this worked spotlessly on the second attempt.
+
+It may not be Rust-y or terribly efficient, but let's not optimize too early: table generation is not called often.
+
+# Reminder: literals and sequences
+
+A compressed block in Zstandard consists of a collection of literals and sequences, as discussed in [Part III]({% post_url 2021-09-22-entropy3 %}).
+
+In the same post, we started parsing this structure in `process_compressed_block`: a compressed block starts with some header that tells us:
+
+- The compressed size `csize`
+- The decompressed size `rsize`
+- How literals are compressed (`Raw`, `Rle`, `Compressed`, or `Treeless`)
+- How many streams there are (1 or 4)
+
+Here ̀`Compressed` means that the literals undergo Huffman coding. and that a Huffman table is provided. `̀Treeless` also means that the literals undergo Huffman coding, but the table is not provided: we reuse the previous one.
+
+If there is a Huffman table, it is tANS/FSE encoded.
+
+Sequences at LZ triples (`litteral_len`, `match_len`, `offset`), and Zstandard allows each of these to be represented differently amongst the following options:
+
+- tANS/FSE encoded using the predefined table we discussed in [Part IV]({% post_url 2021-09-24-entropy4 %})
+- tANS/FSE encoded using a given table
+- RLE encoded;
+- "Repeat mode": we reuse the previous table (or if there is no previous table, the predefined one). If the "repeat mode" follows RLE, the same symbol is repeated. This mode is a bit more complicated, maybe we want to deal with it later.
+
+What we can already do is figure out how literals and sequences are encoded. Let's break it down. First, we'll extract literals and sequences and process them:
+
+```rust
+// File: zrs/zarc/decompress.rs
+
+// New!
+use crate::lz::{lz_decompress, LzSequence};
+
+// ...
+
+fn process_compressed_block(input: Vec<u8>) -> Vec<u8> {
+    // ...
+
+    // Rest of the input to be processed
+    let rest = &input[hlen..];
+
+    // We stopped here last time
+
+    // New!
+    // Extract literals
+    let (literals, skip) = get_literals(rest, rsize, nstreams, literal_type);
+    // Extract Sequences
+    let sequences = get_sequences(&rest[skip..]);
+
+    if sequences.is_empty() {
+        // There are no sequences, the output is just the contents
+        // of the literals
+        return literals.to_vec();
+    }
+
+    // Execute:
+    lz_decompress(&literals, &sequences)
+}
+```
+
+We haven't done anything clever yet, we just assume we can extract literals and sequences, then it's just calling into the `lz_decompress` function we wrote in Part III of this series. We don't even try to handle any kind of error. Maybe it'll come bite us later, we'll see. Let's keep it simple for now, it's already crowded enough.
+
+Now we need to logic to extract literals:
+
+```rust
+// File: zrs/zarc/decompress.rs
+// ...
+
+fn get_literals(
+    input: &[u8],
+    rsize: u16,
+    nstreams: usize,
+    literal_type: LiteralType,
+) -> (Vec<u8>, usize) {
+
+    let rest_len = input.len();
+
+    // Is there a Huffman table?
+    let is_huff_desc = literal_type == LiteralType::Compressed;
+
+    // Is there a jump table? (multiple streams)
+    let is_jump_table = nstreams == 4;
+
+    // Get literals
+    match literal_type {
+        LiteralType::Rle => {
+            // Only one stream, 1 byte long
+            // Decompressed by repeating it rsize times
+            (vec![input[rest_len - 1]; rsize as usize], rest_len)
+        }
+        LiteralType::Raw => {
+            // Only one stream, rsize bytes long
+            // Stream contains the uncompressed literals
+
+            let rsize = rsize as usize;
+            (input[..rsize].to_vec(), rsize)
+        }
+        LiteralType::Compressed | LiteralType::Treeless => {
+            // TODO: determine or reuse Huffman table
+            // TODO: decompress Huffman-coded literals
+
+            unimplemented!("Huffman-coded literals not supported yet")
+        }
+    }
+}
+```
+
+The `Rle` case is easily handled, and the `Raw` case is not much harder. We don't deal with the Huffman-coded case just yet because we would have to _think_ and _thinking is exhausting_. So let's just say we leave it for our future-selves.
+
+Now, to the sequences:
+
+```rust
+// File: zrs/zarc/decompress.rs
+// ...
+
+fn get_sequences(input: &[u8]) -> Vec<LzSequence> {
+let mut sequences = input;
+
+    // Extract information about how they are stored. This is
+    // needlessly complicated but that's how Zstandard works
+    let byte0 = sequences[0];
+    let nb_sequences = match byte0 {
+        0 => {
+            // There are no sequences, decompressed content is only
+            // the contents of the literals
+            return vec![];
+        }
+        1..=127 => {
+            // Only one byte
+            sequences = &sequences[1..];
+            byte0 as usize
+        }
+        128..=254 => {
+            // Use 2 bytes
+            let byte1 = sequences[1];
+            sequences = &sequences[2..];
+            ((byte0 as usize - 128) << 8) + byte1 as usize
+        }
+        _ => {
+            // Use 3 bytes
+            let byte1 = sequences[1];
+            let byte2 = sequences[2];
+            sequences = &sequences[3..];
+            0x7f00 + ((byte2 as usize) << 8) + byte1 as usize
+        }
+    };
+
+    let compression_byte = sequences[0];
+    sequences = &sequences[1..];
+
+    let get_mode = |x| match x {
+        0 => SeqInfo::Predefined,
+        1 => SeqInfo::Rle,
+        2 => SeqInfo::Fse,
+        3 => SeqInfo::Repeat,
+        _ => panic!(), // Impossible
+    };
+
+    let match_len_mode = get_mode((compression_byte >> 2) & 0x3);
+    let offsets_mode = get_mode((compression_byte >> 4) & 0x3);
+    let literals_mode = get_mode(compression_byte >> 6);
+
+    let bitstream = sequences.view_bits::<Lsb0>();
+
+    // TODO: read stream
+
+    unimplemented!("Sequence extraction")
+}
+```
+
+Ok let's breathe for a moment and se where we are:
+
+- We don't handle Huffman-encoded literals. We'll deal with that later, this won't be hard, I promise, and it won't pop up right away, so let's put that aside for now.
+- We have the sequences bitstream to process. How is information stored in this bitstream?
+
+# Padding
+
+First thing. Since we are operating on bits, but computers really only handle _bytes_, out bitstream is byte-aligned. To indicate the actual beginning of a stream, Zstandard adds a `1` (remember that a stream "begins" at the right), padding with zeros if necessary to make a full byte.
+
+In our case, there is a single `1` and then the stream begins.
+
+We just need to remove the first `1` appearing in the stream, and we're done.
+
+```rust
+    // Trim bitstream
+    while !bitstream.pop().unwrap() {}
+```
+
+# Extracting sequences
+
+Each sequence item is made of 3 fields: `literal_len`, `offset`, `match_len`. In Zstandard they are encoded independently and _interleaved_, which means that we have 3 tANS/FSE decoding operations going on at the same time.
+
+Since we'll need it anyway, let's work on our tANS/FSE decoder first:
+
+```rust
+// File: zrs/zarc/fse.rs
+// ...
+pub struct Decoder {
+    dtable: DTable,
+    accuracy: u8,
+    state: Option<usize>,
+}
+
+pub fn bits_to_integer(bits: &BitSlice<LocalBits, u8>) -> usize {
+    let mut result = 0;
+    for i in (0..bits.len()).rev() {
+        let bit = bits[i];
+        if bit {
+            result |= 1;
+        }
+        result <<= 1;
+    }
+    result >>= 1;
+}
+
+
+impl Decoder {
+    pub fn use_table(dtable: DTable, accuracy: u8) -> Self {
+        Self {
+            dtable,
+            accuracy,
+            state: None,
+        }
+    }
+
+    pub fn load_initial_state(&mut self, bitstream: &mut BitVec) -> u8 {
+        // Consume `accuracy` bits as the initial state
+        let len = bitstream.len();
+        let state_data = bitstream.split_off(len - self.accuracy as usize);
+
+        // Convert to integer
+        let state = bits_to_integer(&state_data);
+        self.state = Some(state);
+
+        // Output symbol
+        self.dtable.table[state].symbol
+    }
+
+    pub fn decoder_step(&mut self, bitstream: &mut BitVec) -> u8 {
+        let dtable_entry = &self.dtable.table[self.state.unwrap()];
+        let nb_bits = dtable_entry.nb_bits;
+        let baseline = dtable_entry.baseline;
+
+        // Read nb_bits from input
+        let len = bitstream.len();
+        let offset_data = bitstream.split_off(len - nb_bits as usize);
+        let offset = bits_to_integer(&offset_data);
+
+        // Compute offset and move to new state
+        let new_state = offset + baseline;
+        self.state = Some(new_state);
+
+        // Output corresponding symbol
+        self.dtable.table[new_state].symbol
+    }
+}
+```
+
+We don't perform any sort of bound check or error handling here. We're coding in Rust after all, the worst that will happen is a `panic`. The `state` field is there as an `Option<usize>` to remind us that we need to initialise it at some point. When all of this works we'll come back and do some tidying up.
+
+Ok so it seems we are ready to harness `Predefined` distributions and get some sequences!
+
+# Extracting sequences... getting to it
+
+Let's get going:
+
+```rust
+// File: zrs/zarc/decompress.rs
+// ...
+
+fn get_sequences(input: &[u8]) -> Vec<LzSequence> {
+    // ...
+
+    // We stopped here last time
+    let mut bitstream = sequences.view_bits::<Lsb0>();
+
+    // New! This will hold our collected sequences
+    let mut result = vec![];
+
+    // Temporary! We only support predefined tables for now
+    if match_len_mode != SeqInfo::Predefined {
+        unimplemented!()
+    }
+    if offsets_mode != SeqInfo::Predefined {
+        unimplemented!()
+    }
+    if literals_mode != SeqInfo::Predefined {
+        unimplemented!()
+    }
+
+    let mut bitstream = bitstream.to_bitvec();
+
+    // TODO
+}
+```
+
+In theory, now, `bitstream` contains all the sequences we need. We can prepare our 3 decoders:
+
+```rust
+// File: zrs/zarc/decompress.rs
+// ...
+
+fn get_sequences(input: &[u8]) -> Vec<LzSequence> {
+    // ...
+
+    // We stopped here last time
+    let mut bitstream = bitstream.to_bitvec();
+
+    let dtable1 = fse::DTable::from_weights(
+        &fse::DEFAULT_LITLEN_WEIGHT,  //
+        fse::DEFAULT_LITLEN_ACCURACY, //
+    );
+    let dtable2 = fse::DTable::from_weights(
+        &fse::DEFAULT_OFFSET_WEIGHT,  //
+        fse::DEFAULT_OFFSET_ACCURACY, //
+    );
+    let dtable3 = fse::DTable::from_weights(
+        &fse::DEFAULT_MATCHLEN_WEIGHT,  //
+        fse::DEFAULT_MATCHLEN_ACCURACY, //
+    );
+
+    // Decoders
+    let mut dec_litlen = fse::Decoder::use_table(dtable1, fse::DEFAULT_LITLEN_ACCURACY);
+    let mut dec_offset = fse::Decoder::use_table(dtable2, fse::DEFAULT_OFFSET_ACCURACY);
+    let mut dec_matchlen = fse::Decoder::use_table(dtable, fse::DEFAULT_MATCHLEN_ACCURACY);
+
+    // TODO
+}
+```
+
+So far, so good. We have 3 decoders using the predefined tables, with their respective accuracies. Now we only need to read the first symbol, which will be a "literal length code".
+
+```rust
+// File: zrs/zarc/decompress.rs
+// ...
+
+fn get_sequences(input: &[u8]) -> Vec<LzSequence> {
+    // ...
+
+    // New
+    let mut code_litlen = dec_litlen.load_initial_state(&mut bitstream);
+
+    // TODO
+}
+```
+
+Ok and then... Wait! Wait. A literal length "code"? What is it all about? Weren't we supposed to read "literal length"? Weeeeellll... not quite.
+
+You see, rather than store every possible literal length, which would require many symbols and therefore many states, Zstandard **only encodes the high bits of it** (the "baseline"). How do we find the remaining bits? They are there, in the bitstream, in plain, just after.
+
+So that's what this _code_ is about: it tells us the first bits (the "baseline") and how many bits remain to be read verbatim from the bitstream. Here's the table for `lit_len_code`:
+
+```rust
+// File: zrs/zarc/fse.rs
+// ...
+
+// Hand typed from the spec, don't thank me
+pub const LITLEN_CODE: [(u32, u16); 36] = [
+    (0, 0), (1, 0), (2, 0), (3, 0),
+    (4, 0), (5, 0), (6, 0), (7, 0),
+    (8, 0), (9, 0),   (10, 0), (11, 0),
+    (12, 0), (13, 0), (14, 0), (15, 0),
+    (16, 1), (18, 1), (20, 1), (22, 1),
+    (24, 2), (28, 2), (32, 3), (40, 3),
+    (48, 4), (64, 6),        (128, 7), (256, 8),
+    (512, 9), (1024, 10),    (2048, 11), (4096, 12),
+    (8192, 13), (16384, 14), (32768, 15), (65536, 16),
+];
+```
+
+So when we read a certain code, say `22`, we go look into this table: `LITLEN_CODE[22] = (32, 3)`. We therefore read 3 additional bits from the bitstream, and add the result to the baseline `32` to get the actual literal length.
+
+Right so :
+
+- Reading a code means we'll have to read extra bits to convert it into a sequence field (but we don't necessarily perform this read right away!)
+- Updating the decoder's state means we'll have to read extra bits to get the new state.
+  The bitstream is therefore a mixture of state-related-bits and code-related-bits, which we read one after another (and there are 3 decoders, so 3 states and 3 running codes). This probably sounds confusing. It's confusing to me. Let's draw.
+
+The first step is reading some initial state from the bitstream. Recall that we start from the end of the stream, **skipping the padding bit**, and we start with the literal len decoder (which is red).
+
+<center>
+<script type="text/tikz">
+  \begin{tikzpicture}
+    \draw[fill=red!50] (12.25,0.5) rectangle (14.35, -0.5);
+
+    \node[color=red!50!black] at (13.25, -1) {state 55};
+    \node[anchor=west] at (13.25, -1.5) {$\downarrow$ (in dtable)};
+
+    \node[color=red!50!black] at (13.25, -1.85) {baseline = 32};
+    \node[color=red!50!black] at (13.25, -2.2) {nbbits = 5};
+    \node[color=red!50!black] at (13.25, -2.55) {code = 18};
+
+    \draw[>=latex,->] (12.25, -2.6) to node[above,midway]{in \texttt{LITLENCODE}} (9, -2.6);
+
+    \node[color=red!50!black] at (7.75, -2.55) {baseline = 20};
+    \node[color=red!50!black] at (7.75, -2.2) {nbbits = 1};
+
+    \node[anchor=west,scale=1.25] at (14.25, -2.1) {\} determine next state};
+    \node[anchor=east,scale=1.25] at (6.75, -2.4) {determine literal len \{};
+    \node[scale=2,anchor=west] at (0,0) {~\,1000111000101010111000110101110011110111};
+
+\end{tikzpicture}
+</script>
+<br/>
+<em>Fig. 1: Bitstream.</em>
+
+</center>
+<br/>
+
+We won't know the next state until we read the required `nb_bits` from the stream, and we won't know the literal len until we read its own required `nb_bits` from the stream. Lets refer to them respectively as "state" `nb_bits` and `baseline`, and "code" `nb_bits` and `baseline`.
+
+Initially, we just read the initial state for literal len (red), offset (green), and match len (blue), in that order:
+
+<center>
+<script type="text/tikz">
+  \begin{tikzpicture}
+    \draw[fill=red!50] (12.25,0.5) rectangle (14.35, -0.5);
+    \draw[fill=green!50] (12.2,0.5) rectangle (10.5, -0.5);
+    \draw[fill=blue!50] (8.4,0.5) rectangle (10.45, -0.5);
+
+    \node[color=red!50!black] at (13.25, -1) {state 55};
+    \node[color=green!50!black] at (11.35, -1) {state 19};
+    \node[color=blue!50!black] at (9.4, -1) {state 43};
+
+    \node[anchor=west] at (13.25, -1.5) {$\downarrow$ (in dtable)};
+
+    \node[color=red!50!black] at (13.25, -1.85) {baseline = 32};
+    \node[color=red!50!black] at (13.25, -2.2) {nbbits = 5};
+    \node[color=red!50!black] at (13.25, -2.55) {code = 18};
+
+    \draw[>=latex,->] (12.25, -2.6) to node[above,midway]{in \texttt{LITLENCODE}} (9, -2.6);
+
+    \node[color=red!50!black] at (7.75, -2.55) {baseline = 20};
+    \node[color=red!50!black] at (7.75, -2.2) {nbbits = 1};
+
+    \node[anchor=west,scale=1.25] at (14.25, -2.1) {\} determine next state};
+    \node[anchor=east,scale=1.25] at (6.75, -2.4) {determine literal len \{};
+    \node[scale=2,anchor=west] at (0,0) {~\,1000111000101010111000110101110011110111};
+
+\end{tikzpicture}
+</script>
+<br/>
+<em>Fig. 2: Bitstream: initial states.</em>
+
+</center>
+<br/>
+
+Then we read, **in that order which is different from the above one**, first the `nb_bits` for offset (state 19, code 4, code `nb_bits` 4, code `baseline` 16), then match len (state 43, code 1, code `nb_bits` 0, code `baseline` 4), and finally literal len (code `nb_bits` 1, code `baseline` 20).
+
+<center>
+<script type="text/tikz">
+  \begin{tikzpicture}
+    \fill[fill=red!25] (12.25,0.5) rectangle (14.35, -0.5);
+    \fill[fill=green!25] (12.2,0.5) rectangle (10.5, -0.5);
+    \fill[fill=blue!25] (8.4,0.5) rectangle (10.45, -0.5);
+
+    \draw[fill=green!50] (8.35, 0.5) rectangle (6.95, -0.5);
+    \draw[fill=red!50] (6.6, 0.5) rectangle (6.95, -0.5);
+
+    \draw[>=latex,->] (7.5, -0.5) to (9, -1);
+    \draw[>=latex,->] (6.8, -0.5) to (5, -1);
+    \draw[>=latex,->] (6.95, -0.5) to (6.95, -1.5);
+
+    \node[anchor=west,color=green!50!black] at (9.25, -1) {offset = 16 + 1 -3 = 14};
+    \node[color=blue!50!black] at (6.95,-1.75) {match len = 4 + 0 = 4};
+    \node[anchor=east,color=red!50!black] at (4.75, -1) {literal len = 20 + 1 = 21};
+
+    \node[scale=2,anchor=west] at (0,0) {~\,1000111000101010111000110101110011110111};
+
+\end{tikzpicture}
+</script>
+<br/>
+<em>Fig. 3: Bitstream: extra bits for sequence fields.</em>
+
+</center>
+<br/>
+
+Notice that we subtract 3 from `offset` --- this is said so in the standard, for now we just accept it. Also notice that, since the code for match len had 0 `nb_bits`, we don't need to read for the stream to determing the value of match len.
+
+There! We have our first sequence! It's $$(21, 14, 4)$$.
+
+Before we can read the next one, we need to take care of updating states. This is done in the following order: first the literal len decoder is updated, then match len decoder, then offset decoder. To do that, we need to determine the new states by reading the "state" `nb_bits` from the stream and add it to the "state" `baseline`.
+
+Recall that according to the initial state reading:
+
+- literal len decoder is in state 55 (state `nb_bits` 5, state `baseline` 32),
+- match len decoder is in state 43 (state `nb_bits` 4, state `baseline` 32)
+- offset decoder is in state 19 (state `nb_bits` 5, state `baseline` 0)
+
+<center>
+<script type="text/tikz">
+  \begin{tikzpicture}
+    % \draw (0.125,0.5) rectangle (0.625, -0.5);
+    
+    \fill[fill=red!10] (12.25,0.5) rectangle (14.35, -0.5);
+    \fill[fill=green!10] (12.2,0.5) rectangle (10.5, -0.5);
+    \fill[fill=blue!10] (8.4,0.5) rectangle (10.45, -0.5);
+
+    \fill[fill=green!25] (8.35, 0.5) rectangle (6.95, -0.5);
+    \fill[fill=red!25] (6.6, 0.5) rectangle (6.95, -0.5);
+
+    \draw[fill=red!50] (6.6,0.5) rectangle (4.8, -0.5);
+    \draw[fill=blue!50] (3.4,0.5) rectangle (4.8, -0.5);
+    \draw[fill=green!50] (3.4,0.5) rectangle (1.7, -0.5);
+
+    \node[color=red!50!black] at (5.8, -0.75) {21};
+    \node[color=blue!50!black] at (4.25, -0.75) {4};
+    \node[color=green!50!black] at (2.5, -0.75) {14};
+
+    \node[color=red!50!black] at (5.8, -1.25) {$\downarrow$};
+    \node[color=red!50!black] at (5.8, -1.7) {new state = 21 + 32 = 53};
+
+    \node[scale=2,anchor=west] at (0,0) {~\,1000111000101010111000110101110011110111};
+
+\end{tikzpicture}
+</script>
+<br/>
+<em>Fig. 4: Bitstream: extra bits for next states.</em>
+
+</center>
+<br/>
+
+Thus we get the new states for our decoders:
+
+- The literal len decoder will go to state 53
+- The match len decoder will go to state 36
+- The offset decoder will go to state 14
+
+This determines new codes, which require that we read bits to determine the three fields of a new sequence element. Then we read bits to determine the next state of each decoder, and so forth. Unless we are reading the last sequence, in which case there is no need to update state.
+
+# Extracting sequences... Almost!
+
+Ok, if we now have a grasp of what should be going on (in theory!) during decompression, let's try our hand as some compression, just to see if it makes sense. We'll try to compress a simple string, see if have a good idea what the bitstream would look like. I chose
+
+> `This may be a slightly better example: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAaa`
+
+This string can be compressed as:
+
+- Literals `This may be a slightltter example: Aaa`
+- Sequence `((21, 14, 4), (15, 1, 36))`
+
+with the convention that, if there are any literals left at the end, they are appended to the output. This is the convention Zstandard uses.
+
+> Oh look, in our example bitstream in figures 1, 2, 3, the first decoded sequence is exactly (21, 14, 4)! What a coincidence! As if _someone_ had drawn it on purpose.
+
+But imagine that this _someone_ (which is me, by the way, in case you hadn't guessed) had stopped there, and you are to figure out what the rest of the bitstream should be. In other terms, how will we compress the sequence (15, 1, 36) now?
+
+- We _would like_ the next literal len to be 15. This corresponds to a literal len code of 15 and no extra bits. To get to this code, we need to jump from the current state of 55 to the state 53.
+
+  - State 55 (that we're currently in for the literal len decoder) will take 5 bits from the stream and add 32 to the result. We need 53, so the 5 bits should be 21, i.e, `10101`.
+
+- Ok, what about match len? We want it to be 36, corresponding to code 32 with one extra bit set to `1`. To get to this code we need to jump from current state of 43 to the state 36.
+
+  - State 43 (that we're currently in for the match len decoder) will take 4 bits from the stream and add 32 to the result. We need 36, so the 4 bits should be 4, i.e. `0100`.
+
+- Finally, we want the offset to be 1, corresponding to and code of 2, with two extra bits set to `00`. (This gives 4 - 3 = 1). To get to this code we need to jump from current state of 19 to the state 14.
+
+  - State 19 (that we're currently in for the offset decoder) will take 5 bits from the stream. We need these bits to be 14, i.e., `01110`.
+
+Ooookay, so logically, the remainder of our bitstream is
+
+- `10101` (extra bits for the new literal len decoder state), preceded by
+- `0100` (extra bits for the match len decoder), preceded by
+- `01110` (extra bits for the offset decoder), preceded by
+- `00` (extra bits for the offset), preceded by
+- `1` (extra bit for match len), preceded by
+- nothing (extra bit for literal len)
+
+All in all: `10001110010010101`. Sounds familiar? Well that's because that's what we see in the figures above. That's the right stream for this.
+
+That sounds pretty convincing to me. Let's complete our decoder:
+
+```rust
+// File: zrs/zarc/decompress.rs
+// ...
+
+fn get_sequences(input: &[u8]) -> Vec<LzSequence> {
+    // ...
+
+    // Initial states (beware order)
+    let mut code_litlen = dec_litlen.load_initial_state(&mut bitstream);
+    let mut code_offset = dec_offset.load_initial_state(&mut bitstream);
+    let mut code_matchlen = dec_matchlen.load_initial_state(&mut bitstream);
+
+    for i in 0..nb_sequences {
+        // Read codes (beware order)
+        let offset = fse::read_offset_code(code_offset, &mut bitstream);
+        let match_len = fse::read_code(code_matchlen, &fse::MATCHLEN_CODE, &mut bitstream);
+        let literal_len = fse::read_code(code_litlen, &fse::LITLEN_CODE, &mut bitstream);
+
+        result.push(LzSequence {
+            literal_len,
+            offset,
+            match_len,
+        });
+
+        if i != nb_sequences - 1 {
+            // Update states (beware order)
+            // Don't update state after last sequence item
+            code_litlen = dec_litlen.decoder_step(&mut bitstream);
+            code_matchlen = dec_matchlen.decoder_step(&mut bitstream);
+            code_offset = dec_offset.decoder_step(&mut bitstream);
+        }
+    }
+
+    result
+}
+```
+
+# It's a good place to stop
+
+Does it work? Running `zstd` to compress the text above yields the exact bitstream we've discussed, and our program decompresses it fine. It doesn't do anything with it just yet, but we do recover the original text and everything goes smoothly.
+
+(I won't lie, it took me almost a week to figure it all out from the spec, which doesn't exactly make things extremely clear. But hey, here we are, we are decompressing, that's what matters!)
+
+We can now handle raw and RLE blocks, and some compressed blocks: those having RLE-encoded or raw literals, and whose tANS/FSE-encoded sequences use the predefined distributions.
+
+On the TODO list remain: Huffman-encoded literals (and their tANS/FSE-encoded Huffman tables), sequence items encoded with a custom distribution, and a couple _special rarely occurring things_ (RLE and "repeat" sequences, "treeless" literals). Nothing extraordinary hopefully.
+
+When that's done we'll have a neat little Zstandard decompressor! We'll clean it up and make it nice and shiny. And who knows, maybe we'll look into compression too? So many things to discuss next time! Go to [Part VI]({% post_url 2021-10-04-entropy6 %})!
+
+_Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
+
+[coffee]: https://www.buymeacoffee.com/shargs

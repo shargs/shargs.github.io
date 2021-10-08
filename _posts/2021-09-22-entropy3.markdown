@@ -1,0 +1,596 @@
+---
+layout: post
+title: "Writing ourselves an Zstandard codec in Rust. Part III."
+date: 2021-09-22
+categories: data-compression
+description: In this post series, we attempt to write an Zstandard codec.
+---
+
+> _**Disclaimer:** this is not final. If you find mistakes, please report them._
+
+# Part III: LZ77, Huffman, RLE
+
+This post is part of a series on entropy coding and writing our own Zstandard library in Rust.
+
+**Part**
+[I]({% post_url 2021-09-16-entropy1 %}) ·
+[II]({% post_url 2021-09-19-entropy2 %}) ·
+[III]({% post_url 2021-09-22-entropy3 %}) ·
+[IV]({% post_url 2021-09-24-entropy4 %}) ·
+[V]({% post_url 2021-09-28-entropy5 %})
+[VI]({% post_url 2021-10-04-entropy6 %})
+
+Welcome back to the series. In the previous episodes, we set up some boilerplate to get data in and out of `zst` archives, compute and verify checksums, and handle common errors.
+
+Now it's time to get to the meat of the matter: compression (which is why I started this series initially). This requires some theory, if only to clarify the terminology.
+
+# Lempel-Ziv coding
+
+As we discussed in [Part I]({% post_url 2021-09-16-entropy1 %}), Lempel-Ziv (LZ) coding is at the heart of practically all lossless compression algorithms . It's one of these ideas that are so obvious in hindsight that it was bound to be (re)invented. All great ideas are like this.
+
+There are two kinds of LZ codewords:
+
+- A **literal**, which means a value that will _literally_ be copied to the output,
+- A **copy command**, which tells us to copy-paste a portion of the output into itself.
+  Thus a compressed data stream is represented as a **sequence** of literals and copy commands.
+
+A typical copy command contains a "match length", which is the length to be copied, and a "match offset", which tells us how far back we need to look to start copying. Here's an example: we use `[x]` to denote a literal `x` and `(l,o)` to denote a copy command with length `l` and offset `o`:
+
+> `[H][e][l][l][o][ ][Y](4,6)[w]`
+
+This will decompress as "H<mark>ello</mark> Y**ello**w", where the bold part here is the copy-pasted content, and the highlighted part is where we copied from.
+
+Let's squeeze more out of this algorithm. What happens if `l > o`, meaning that we copy more data than there is currently in the output? Consider for instance
+
+> `[H][e][l][l][o](6, 2)`
+
+Let's follow through step by step as we copy: this is what the output looks like
+
+- Hello
+- Hel<mark>l</mark>o**l**
+- Hell<mark>o</mark>l**o**
+- Hello<mark>l</mark>o**l**
+- Hellol<mark>o</mark>l**o**
+- Hellolo<mark>l</mark>o**l**
+- Hellolol<mark>o</mark>l**o**
+
+Clever, isn't it?
+
+And... that's all! Well, the burden is on the compressor to find the best way to reuse data, but the _spirit_ of LZ77 is all there.
+
+We just need to agree on a way to represent `[x]` and `(l,o)` in terms of bits and bytes. The way Zstandard (and many others) do this is by splitting literals from sequences as follows: first put all literals in a dedicated section, then put all copy commands, using the following format: every command is a triple `(l1,o,l2)` meaning "copy `l1` literals verbatim from the literal section, then copy `l2` literals from the output starting at offset `o` from the end".
+
+A couple examples will make that clearer: assume our litteral section contains "Hello". If our sequence is (3, 2, 1) we get as output:
+
+- Hel (copied 3 literals verbatim from the literal sections)
+- H<mark>e</mark>l**e** (copied from offset 2 with length 1)
+
+And if we want to compress "Hello Yellow" as earlier, we'd put
+
+- In the litterals section: `Hello Yw`
+- In the sequence section: (6, 0, 0), (1, 6, 4), (1, 0, 0)
+
+Indeed we get, step by step:
+
+- `Hello `
+- `Hello Yello`
+- `Hello Yellow`
+
+(For fun: there is a more compact sequence doing the same, can you find it?)
+
+Let's write a simple LZ decoder for this syntax. We won't write it in Rust _just yet_, this is just a toy program, let's use Python instead:
+
+```python
+# File lz_decompress.py
+
+def lz_decompress(literals, sequences):
+    output = ""
+    for (l1, o, l2) in sequences:
+
+        # Output l1 literals
+        output += literals[:l1]
+
+        # Consume literals
+        literals = literals[l1:]
+
+        # Copy l2 literals from output
+        # Starting at offset o from the end
+        start = len(output) - o
+        for i in range(l2):
+            output += output[start + i]
+
+    return output + literals
+
+# Test
+literals = "Hello Yw"
+sequences = ((6, 0, 0), (1, 6, 4), (1, 0, 0))
+
+print(lz_decompress(literals, sequences))
+# Prints "Hello Yellow"
+```
+
+How nice is that? Pretty neat isn't it!
+
+Note the convention that, if there are any remaining literals after we used all sequences, the literals are just appended to the output.
+
+Every `Compressed` block in a Zstandard frame contains the literals and the sequences, which we _just_ need to process as above. And then we get the decompressed output, just like that!
+
+What remains to be said (besides compression, we'll come to it later) is how we store literals and sequences in the file. Zstandard has an aggressive, multi-layered response to this. A lot of effort is spent to store literals and sequences _as compactly as possible_.
+
+Two algorithms are involved in achieving that: Huffman coding and tANS coding (referred to within Zstandard as FSE).
+
+# Huffman's algorithm
+
+Huffman coding is the simpler of the two, is extremely well-known and widespread, and it's the oldest -- being around since 1952.
+
+The main idea is to replace every literal by a sequence of bits, in such a way that shorter sequences are given to more frequent literals. This contrasts with the "naive" method of using a fixed size for every literal -- for instance 8 bits for every `u8` value. Every time we use a frequent literal, we therefore save a little bit of memory.
+
+> **Note:** that also means that some literals are mapped to _longer_ bit sequences, but since they are rare, the overall balance of this operation is in our favour.
+
+The bit sequences used to represent literals cannot be entirely arbitrary: if we allowed the sequences `0` and `00` for instance, then what does `000` mean: is that `0` followed by `00`? or three times `0`? Or `00` followed by `0`? We just wouldn't know.
+
+Huffman coding solves this by guaranteeing that the bit sequences are **prefix free**: no sequence will be the prefix of another.
+
+The result is a table that maps each literal to a bit sequence. Let's cheat a little bit and use the existing `huffman` Python module to see what is going on:
+
+```python
+# File: huff.py
+import huffman
+
+print(
+    huffman.codebook(
+        [('A', 5),
+         ('B', 4),
+         ('C', 3),
+         ('D', 2),
+         ('E', 1)]
+    )
+)
+```
+
+```bash
+$ pip install huffman
+$ python huff.py
+
+# Displays: {'A': '11', 'B': '10', 'C': '00', 'D': '011', 'E': '010'}
+```
+
+This module does the heavy lifting for our example. We feed it with our literals and their weights, and it spits out what binary sequence we should use. Let's make the example more interesting:
+
+```python
+# File: huff.py
+import huffman
+
+message = "Hello world!"
+
+# Count how many times each letter appears
+counter = {l: 0 for l in message}
+for l in message:
+    counter[l] += 1
+
+table = huffman.codebook(counter.items())
+compressed = '|'.join(table[l] for l in message)
+
+print(table)
+#{'H': '1110', 'e': '1101', 'l': '01', 'o': '101', ' ': '1100', 'w': '001', 'r': '000', 'd': '1111', '!': '100'}
+print(compressed)
+# 1110|1101|01|01|101|1100|001|101|000|01|1111|100
+```
+
+Hopefully you see why Huffman encoding is interesting: the compressed message is 12 bits, contra 37 for the original message! (You also see why we use Python here: this is quick'n'dirty... the `|` separation is only there to see individual codewords) There's a small catch however: we need to _store the table_ too. Or at least a way to regenerate the table. We'll come to that later.
+
+Thanks to the code being prefix-free, it is easy to decompress: we look for the shortest bit sequence that matches one of the code in the table, rinse and repeat.
+
+```python
+# File: huff.py
+
+# Omitted: table creation
+
+compressed = ''.join(table[l] for l in message) # No separation
+
+# Table inversion
+dtable = {table[key]: key for key in table.keys()}
+bitstream = list(compressed)[::-1]
+
+# Decompression
+output = ''
+current_code = ''
+while len(bitstream) > 0:
+    last_bit = bitstream.pop()
+    current_code += last_bit
+    if current_code in dtable.keys():
+        output += dtable[current_code]
+        current_code = ''
+
+print(output)
+# Hello world!
+```
+
+This code is a bit naive -- in particular it assumes that there are no errors and that the table is well-formed -- but it does the job.
+
+> A small limitation of Huffman coding is that we need at least two different literals with nonzero weights for it to work. Otherwise, we'll simply use RLE!
+
+Note that in our code, we reversed the bitstream before decompression. It is innocuous here, and just makes our life slightly easier (because we can `pop`), but it will turn out to be important. And Zstandard also decompresses from back to front, so it's good to see it now.
+
+# Putting it all together
+
+**Let's take a break and see what we have** :
+
+- Lempel-Ziv coding uses the "copy and paste" mechanism to reduce memory usage, and produces two sets: a set of **literals**, and a set of **sequences**. It makes use of the fact that data is repetitive.
+- Literals are compressed, using Huffman coding: each literal is replaced by a shorter equivalent using only few bits. A **table** is stored that allows going back and forth between this compact representation, and the full-size literals. Huffman coding makes use of the fact that some literals are used much more often than others.
+- Sequences are compressed (using tANS, we haven't discussed that yet)
+- The Huffman table is compressed (using tANS too)
+
+Describing the way the LZ sequences and the Huffman table are stored in Zstandard requires _yet another compression algorithm_ --- the last one, don't worry --- which is more complex and requires its own post, so we defer its description to a future part in this series.
+
+So for now we naively assume that LZ sequences and Huffman tables are given in plain format.
+
+> **Side node:** in some cases, in Zstandard, literals are _not compressed_, or they are only RLE-compressed. This mostly happens when there are very few literals, which would make storing a Huffman table too expensive.
+
+Meanwhile there are still a couple of loose ends:
+
+- We have been silent on how LZ _compression_ determines the appropriate sequences for a given input;
+- We have been evasive on how the Huffman algorithm determines what bit sequence to use for each literal.
+
+# LZ decompression
+
+More dramatically, we have not written any Rust... Let's fix that. First LZ decompression, which is straightforward: just port our Python code.
+
+```rust
+// In zrs/zarc/lib.rs
+
+mod lz; // New!
+
+// ...
+
+```
+
+```rust
+// File: zrs/zarc/src/lz.rs
+
+pub struct LzSequence {
+    literal_len: u16,
+    offset: u16,
+    match_len: u16,
+}
+
+pub fn lz_decompress(literals: &[u8], sequences: &[LzSequence]) -> Vec<u8> {
+    let mut result = vec![];
+    let mut literals = &literals[..];
+    for seq in sequences {
+        // Read literals from input
+        result.extend(&literals[..seq.literal_len as usize]);
+        literals = &literals[(seq.literal_len as usize)..];
+
+        // Copy-paste from output
+        let start = result.len() - seq.offset as usize;
+        for i in 0..seq.match_len as usize {
+            result.push(result[start + i]);
+        }
+    }
+
+    // Dump any remaining literal
+    result.extend(literals);
+
+    result
+}
+```
+
+# Huffman coding
+
+For Huffman coding, we won't reinvent the wheel: there's an existing and excellent `huffman-compress` crate that seems to do the job (we'll revise this judgement if and when we run into some issue later ~~foreshadowing~~).
+
+```bash
+$ cargo add huffman-compress
+```
+
+We'll just wrap things around so that we can make efficient use of it later.
+
+```rust
+// File: zrs/zarc/src/huffman.rs
+
+use bit_vec::BitVec;
+use huffman_compress::{Book, CodeBuilder, Tree};
+use std::{collections::HashMap, hash::Hash, iter::FromIterator};
+
+pub struct HuffmanTable<K>
+where
+    K: Ord + Clone,
+{
+    encoder: Book<K>,
+    decoder: Tree<K>,
+}
+
+impl<K> HuffmanTable<K>
+where
+    K: Ord + Clone + Hash,
+{
+    pub fn decompress(&self, bitstream: &BitVec) -> Vec<K> {
+        self.decoder.unbounded_decoder(bitstream).collect()
+    }
+
+    pub fn compress(&self, symbols: &[K]) -> BitVec {
+        let mut buffer = BitVec::new();
+        symbols.iter().for_each(|s| {
+            self.encoder.encode(&mut buffer, s);
+        });
+        buffer
+    }
+
+    pub fn from_weights(symbols: &[K], weights: &[u16]) -> Self {
+        // Add every (symbol, weigth) pair to the HashMap
+        let mut counter = HashMap::new();
+        symbols.iter().zip(weights).for_each(|(s, w)| {
+            counter.insert(s.clone(), *w);
+        });
+
+        let (encoder, decoder) = CodeBuilder::from_iter(counter).finish();
+
+        Self { encoder, decoder }
+    }
+}
+```
+
+There's a little bit of boilerplate there, because we want to compress different kind of stuff, which means we need a generic implementation. Our symbols need to bind `Hash`, `Clone` and ̀`Ord`. The first two are fairly standard, but we may have to think a little about the third one, we'll see.
+
+The result of compression is a `BitVec`, provided by the `bit-vec` crate, which we need to add, and then we can test things:
+
+```rust
+// In zrs/zarc/src/lib.rs
+
+// ...
+
+#[cfg(test)]
+mod tests {
+    // ...
+
+    #[test]
+    fn test_huffman() {
+        let symbols = vec!["A", "B", "C", "D", "E", "F"];
+        let weights = vec![5, 4, 3, 2, 2, 1];
+
+        let message = vec!["B", "A", "D", "B", "A", "B", "E"];
+
+        let table = huffman::HuffmanTable::from_weights(&symbols, &weights);
+        let compressed = table.compress(&message);
+        let decompressed = table.decompress(&compressed);
+
+        println!("compressed = {:?}, len = {}", compressed, compressed.len());
+
+        assert_eq!(message, decompressed);
+    }
+}
+```
+
+```bash
+$ cargo add bit-vec
+$ cargo test -- --nocapture
+# compressed = 10000111000100100, len = 17
+```
+
+Nice!
+
+> **Note:** it is a bit unfortunate that several crates have a very similar name and function. The `bit-vec` crate is used by `huffman-compress` but it seems to have much fewer features than the (incompatible) `bitvec` crate... If push comes to shove, we may have to write translation code to turn one into the other... or chose one over the other ~ more foreshadowing ~
+
+So what we can do now is LZ compress a sequence, then Huffman-compress the literals. Or rather, for now, take a compressed file, de-Huffman-compress literals and then de-LZ-compress the sequences.
+
+> That's not all the way Zstandard compression but that's almost exactly how zip files work!
+
+Now that we have our theory ready and some understanding of decompression, we can go a bit further on our Zstandard crate. First we'll start handling compressed blocks:
+
+```rust
+// File: zrs/zarc/decompress.rs
+
+// ...
+
+pub fn decompress<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), CzarError> {
+
+    // ...
+
+    for block in blocks {
+        match block.block_type {
+            BlockType::Raw => result.extend(block.contents),
+            BlockType::Rle => result.extend(vec![block.contents[0]; block.block_size as usize]),
+            BlockType::Compressed => {
+                // New!
+                let decompressed = process_compressed_block(block.contents);
+
+                // New! And temporary :)
+                unimplemented!("Post decompressed: {:?}", decompressed)
+            }
+            BlockType::UnknownBlockType(x) => return Err(CzarError::InvalidBlockType(x)),
+        }
+    }
+
+    // ...
+}
+```
+
+This new `process_compressed_block` will first determine how literals are represented (are they compressed or not, and how).
+
+```rust
+// File: zrs/zarc/decompress.rs
+
+// ...
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum LiteralType {
+    Raw,
+    Rle,
+    Compressed,
+    Treeless,
+}
+
+fn process_compressed_block(input: Vec<u8>) -> Vec<u8> {
+
+    // Information about how literals are stored is contained in the first byte
+    let first_byte = input[0];
+    let lt_bits = first_byte & 0x3;
+    let lt_form = (first_byte >> 2) & 0x3;
+
+    assert!(lt_bits < 4 &&  lt_form < 4);
+
+    let literal_type = match lt_bits {
+        0 => LiteralType::Raw,
+        1 => LiteralType::Rle,
+        2 => LiteralType::Compressed,
+        3 => LiteralType::Treeless,
+        _ => panic!(), // Impossible
+    };
+
+    // TODO
+}
+```
+
+As you can see, literals can be raw (uncompressed), RLE compressed, of Huffman compressed. The `Treeless` mode means we reuse the same Huffman table as for the previous block.
+
+At this point, we can read the compression header. But things become a tiny bit complicated: depending on `literal_type` and `lt_form`, header information is packed differently. Namely, the bit length of every field varies:
+
+```rust
+// File: zrs/zarc/decompress.rs
+
+// ...
+
+fn process_compressed_block(input: Vec<u8>) -> Vec<u8> {
+
+    // ...
+
+    let (s_len, rsize_len, csize_len, nstreams, hlen) = match literal_type {
+        LiteralType::Raw | LiteralType::Rle => match lt_form {
+            0 | 2 => (1, 5, 0, 1, 1),
+            1 => (2, 12, 0, 1, 2),
+            3 => (2, 20, 0, 1, 3),
+            _ => panic!(), // Impossible
+        },
+        LiteralType::Compressed | LiteralType::Treeless => {
+            match lt_form {
+                0 => (2, 10, 10, 1, 3),
+                1 => (2, 10, 10, 4, 3),
+                2 => (2, 14, 14, 4, 4),
+                3 => (2, 18, 18, 4, 5),
+                _ => panic!(), // Impossible
+            }
+        }
+    };
+
+    // TODO
+}
+
+```
+
+Here `s_len`, `rsize_len`, `csize_len` tell us the size in _bits_ of the initial offset, decompressed size and compressed size respectively; `nstreams` tells us the number of streams (more on that later), and `hlen` is the size in _bytes_ of the complete header.
+
+We need a convenient way to access _bits_ of the input. We've used a `bit-vec` crate above, can we just... you know... use it?
+
+**Nah** that would be too simple. This crate is too basic for our needs as it doesn't allow bit access across byte boundary. So... we _also_ use the `bitvec` crate. I'm sure we'll have some issue down the line with this. Problem for future me.
+
+```rust
+// File: zrs/zarc/decompress.rs
+
+use bitvec::prelude::*;
+
+// ...
+
+fn process_compressed_block(input: Vec<u8>) -> Vec<u8> {
+
+    // ...
+
+    // Collect however many header bytes we need
+    let lheader = &input[..hlen];
+
+    // Convert to bits
+    let bits = lheader.view_bits::<Lsb0>();
+
+    // Skip initial offset
+    let bits = &bits[s_len..];
+
+    // Collect rsize and csize
+    let len_data = &bits[bits.len() - csize_len - rsize_len..];
+    let rsize = (&len_data[..rsize_len]).from_bits() as u16;
+    let csize = (&len_data[rsize_len..]).from_bits() as u16;
+
+    // Rest of the input to be processed
+    let rest = &input[hlen..];
+
+    // TODO
+}
+```
+
+The `from_bits()` method is not something provided by `bitvec` (unfortunately). It is a function that takes as input a sequence of bits and reads it as an integer. We implement this as an extension trait:
+
+```rust
+// File: zrs/zarc/decompress.rs
+
+// ...
+
+trait FromBits {
+    fn from_bits(&self) -> usize;
+}
+
+impl FromBits for &BitSlice<bitvec::order::Lsb0, u8> {
+    fn from_bits(&self) -> usize {
+        let mut result = 0;
+        for b in self.iter().rev() {
+            if *b {
+                result += 1
+            };
+            result <<= 1;
+        }
+        result >> 1
+    }
+}
+```
+
+Alright, we're almost there:
+
+```rust
+// File: zrs/zarc/decompress.rs
+
+// ...
+
+fn process_compressed_block(input: Vec<u8>) -> Vec<u8> {
+
+    // ...
+
+    match literal_type {
+        LiteralType::Rle => {
+            // Only one stream, 1 byte long
+            // Decompressed by repeating it rsize times
+            return vec![rest[rest_len - 1]; rsize as usize];
+        }
+        LiteralType::Raw => {
+            // Only one stream, rsize bytes long
+            // Stream contains the uncompressed literals
+
+            let rsize = rsize as usize;
+            let literals = &rest[..rsize];
+            let mut sequences = &rest[rsize..];
+
+            // Temporary
+            println!("Literals = {}", String::from_utf8_lossy(literals));
+            unimplemented!("Extract and process sequences");
+        }
+        LiteralType::Compressed | LiteralType::Treeless => {
+            // Temporary
+            unimplemented!("Extract Huffman compressed literals");
+            unimplemented!("Extract and process sequences");
+        }
+    }
+}
+
+```
+
+# It's a good place to stop
+
+We did good today: we learned something new, tried something new, karate-chopped something, and we can see clearly what remains on our plate. Let me summarize the salient points:
+
+- We need to extract Huffman-compressed literals
+- To do that we need to decompress the Huffman table first (compressed with tANS which we haven't discussed yet)
+- Then we need to extract sequences (compressed with tANS too)
+- Finally we run literals and sequences through our `lz_decompress` and sing merily.
+
+Well... there's no dancing around much longer... we need to talk about tANS if we plan to make any progress... (Unless we procrastinate and decide to refactor some code?) See what happens next? Go to [Part IV]({% post_url 2021-09-24-entropy4 %})!
+
+_Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
+
+[coffee]: https://www.buymeacoffee.com/shargs

@@ -1,0 +1,813 @@
+---
+layout: post
+title: "Writing ourselves an Zstandard codec in Rust. Part I."
+date: 2021-09-16
+categories: data-compression
+description: In this post series, we attempt to write an Zstandard codec.
+---
+
+> _**Disclaimer:** this is not final. If you find mistakes, please report them._
+
+I recently had to use data compression in one of my Rust projects. Expectedly, the Rust ecosystem had plenty of high-quality options to choose from, when supporting most formats. But I couldn't put my hands on a Rust Zstandard library [*].
+
+So I decided to write my own. And I felt I should talk bout it. I fell down the rabbit hole and learnt one things or two about data compression, and what makes Zstandard as impressive as it is. In the process I'll explain how it works. The rules of the game are simple: I can only rely on the RFC and on the reference implementation (called `ztsd`) to try and make a working decompressor (and maybe compressor) that can handle _at least_ some files, and we want to understand all the steps.
+
+[*] At the time of writing, the only crate mentioning Zstandard is a _binding_ of the reference C implementation, I felt we could do better.
+
+# Part I: Reading frames
+
+This is part of a series of posts:
+
+**Part**
+[I]({% post_url 2021-09-16-entropy1 %}) ·
+[II]({% post_url 2021-09-19-entropy2 %}) ·
+[III]({% post_url 2021-09-22-entropy3 %}) ·
+[IV]({% post_url 2021-09-24-entropy4 %}) ·
+[V]({% post_url 2021-09-28-entropy5 %})
+[VI]({% post_url 2021-10-04-entropy6 %})
+
+_Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
+
+# Modern lossless compression
+
+Lossless data compression is a way to reduce the amount of memory necessary to store data, without altering the data. This contrasts with _lossy_ compression, which tolerates some degree of alteration in exchange for even higher compression rates.
+
+There are four key ideas in the field of lossless compression:
+
+- **_Dictionary compression_**: if a particular sequence appears often in the data stream, we store the sequence in a "dictionary", assign it an index, and replace the sequence wherever it appears by a reference to the dictionary entry. The reference is shorter than the sequence it replaces, hence we use less data to say the same thing. Two well-known approaches to this are RLE and (variants of) the Lempel-Ziv (LZ) algorithm
+- **_Entropy coding_**: if a symbol (say, a particular character) appears very often in the data stream, we may use less than a full byte to represent it. Three popular approaches to doing this are Huffman coding, arithmetic coding, and asymmetric number systems coding (ASN).
+- **_Data interleaving_**: reordering data may improve the performance of compression, for instance by bunching together repeated symbols. Popular transformations include move-to-front, the Burrows-Wheeler transform, zigzag ordering.
+- **_Context modeling_**: in some contexts, it is possible to "guess" the next symbol going to appear in the data stream with reasonable accuracy. Sometimes the prediction is not quite correct, and we only need to store corrective information (rather than the full symbol).
+
+Ultimately, these ideas are combined to give any particular recipe:
+
+- BZIP2 : BWT/MTF + RLE + Huffman
+- DEFLATE (used in zip, gzip, png): LZ(SS) + Huffman
+- 7zip: LZ(77) + Markov context modeling + Arithmetic coding
+- Brotli: LZ(77) + Huffman + 2nd order context modeling
+- Zstandard / LZFSE: LZ(77) + RLE + Huffman + ASN
+
+> **Note:** lossy compression algorithms also use these as part of their pipelines!
+
+In this series we'll focus on Zstandard (because I said so!), and we'll explore the design and merits of each of its ingredients. If all goes well, we'll get a crate handling this data format, so follow along!
+
+This project will be successful if we can get an existing Zstandard archive to correctly decrypt, and if we can create a Zstandard archive containing compressed files that the reference implementation can decrypt.
+
+# Archive format
+
+We'll be building a Rust library, call it `zrs`, to handle Zstandard archives. If we take a step back, we can decompose our work into
+
+- the "archive" part, which has encrypted data together with metadata;
+- the compression / decompression part.
+
+The compression stage is usually the one requiring the most work, because we may have to decide on the best course of action (i.e., the best way to compress a piece of data) amongst several alternatives.
+
+The archive part is "simply" parsing a file, so that's where we'll begin today. To do that, we first create a Rust workspace
+
+```bash
+$ mkdir zrs
+$ cd zrs
+```
+
+```toml
+# In zrs/Cargo.toml
+
+[workspace]
+members = [
+  "czar",
+]
+```
+
+And within this workspace, we create the `czar` library which will handle Zstandard archives
+
+```bash
+$ cargo new --lib czar
+Created library `czar` package
+```
+
+All good to go.
+
+Zstandard archives are made of _blocks_. Some information is put at the beginning of the file to help us read these blocks. It looks like this:
+
+> (Magic number) (Header) (Block 1) (Block 2) ... (Block N) (Checksum)
+
+#### Magic number
+
+The "magic number" is a constant:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+pub const MAGIC : [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+```
+
+#### Frame header
+
+The frame header tells us all we need to know about this file. It has mandatory and optional fields. Let's write a struct to capture it:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+struct FrameDescriptor {
+    // Mandatory fields
+    size_flag: u8,                  // Whether decompressed size is included
+    single_segment_flag: bool,      // Whether decompressed data is contiguous
+    checksum_flag: bool,            // Whether we add a checksum at the end
+    dict_id_flag: u8,               // Size of dictionary ID (if provided)
+
+    // Optional fields
+    win_desc: Option<WindowDescriptor>, // Helps allocate memory
+    dict_id: Option<u32>,               // Dictionary ID
+    content_size: Option<u64>           // Size of decompressed data
+}
+
+struct WindowDescriptor {
+    exponent: u8,
+    mantissa: u8
+}
+```
+
+The "dictionary ID" is something that will intervene during decompression. For now we don't need to worry too much about it.
+
+#### Blocks
+
+Blocks contain compressed data. The data is split into blocks rather than compressed as a whole: this improves the performance in several ways. The format of a block is captured as follows:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+pub struct Block {
+    last_block: bool,   // This is the last block in file
+    block_type: BlockType, // See below
+    block_size: u32,    // Size of block ()
+    contents: Vec<u8>   // Contents of this block
+}
+
+```
+
+As appears above, a block can be of different types: not compressed (raw), ANS-compressed, or RLE-compressed. Let's capture this with an `enum`:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+enum BlockType {
+    Compressed,             // Compressed with ANS coding
+    Raw,                    // Not compressed: plain data
+    Rle,                    // Compressed with RLE coding
+    UnknownBlockType(u8)    // Anything else
+}
+```
+
+# Let's get to it!
+
+In this first post, we won't try to compress or decompress anything, but we'll do the necessary to extract blocks from an archive (or to put them there).
+
+We'll start by making a real archive with `zstd`:
+
+```bash
+$ mkdir assets
+$ cd assets
+$ echo "This is a sample file with some text inside, just to check that zstd does what I think it does." > hello.txt
+$ zstd hello.txt
+```
+
+This creates a file `hello.txt.zst` which we'll try to read (or at least, for now, extract the blocks).
+
+We'll be using the `Read` trait, which allows us to progressively consume the file byte per byte. So we are going to write a function like:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+use std::io::Read;
+
+pub fn unpack<T: Read>(input: &mut T)  -> Vec<Block>  {
+    let magic = get_magic(input);
+    let frame_descriptor = get_descriptor(input);
+
+    // ...
+}
+```
+
+Here `get_magic` and `get_descriptor` would call `input.read_exact(&mut buffer)` to obtain bytes from the input. But what if we try to read more than there is? **An error would be triggered**. Let's allow ourselves to catch it:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+//                                       👇
+pub fn unpack<T: Read>(input: &mut T)  -> Result<Vec<Block>, std::io::Error>  {
+    //                          👇
+    let magic = get_magic(input)?;
+
+    //                                          👇
+    let frame_descriptor = get_descriptor(input)?;
+
+    // ...
+}
+```
+
+Now we can proceed:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+fn get_magic<T: Read>(input: &mut T) -> Result<[u8; 4], std::io::Error> {
+    let mut buffer = [0; 4];
+    input.read_exact(&mut buffer)?;
+    Ok(buffer)
+}
+```
+
+The frame descriptor has variable size and requires some more logic to determine whether optional fields are there, but nothing extraordinary. We also need some bit fiddling to extract the mandatory fields.
+
+```rust
+// In zrs/czar/src/lib.rs
+
+fn get_descriptor<T: Read>(input: &mut T) -> Result<FrameDescriptor, std::io::Error> {
+    let mut buffer = [0; 1];
+    input.read_exact(&mut buffer)?;
+    let byte_data = buffer[0];
+
+    // Mandatory fields
+    let dict_id_flag = byte_data & 0x3; // Bits 0-1
+    let checksum_flag = (byte_data >> 2) & 1 == 1; // Bit 2
+    let single_segment_flag = (byte_data >> 5) & 1 == 1; // Bit 5
+    let size_flag = byte_data >> 6; // Bits 6-7
+
+    // Determine which optional fields are present
+    let has_window_desc = !single_segment_flag;
+    let has_dict_id = dict_id_flag > 0;
+    let has_content_size = (size_flag > 0) || single_segment_flag;
+
+    // Optional fields
+
+    // Window descriptor
+    let win_desc = if has_window_desc {
+        input.read_exact(&mut buffer)?;
+        let byte_data = buffer[0];
+        let mantissa = byte_data & 0x3;
+        let exponent = byte_data >> 2;
+        Some(WindowDescriptor { exponent, mantissa })
+    } else {
+        None
+    };
+
+    // Dictionary ID
+    let dict_id = if has_dict_id {
+        let mut buffer = vec![0; dict_id_flag as _];
+        input.read_exact(&mut buffer)?;
+
+        // Padding with extra zeros
+        let buffer = [buffer, vec![0; 4 - dict_id_flag]].concat();
+
+        Some(u32::from_be_bytes(buffer))
+    } else {
+        None
+    };
+
+    // Content size
+    let content_size = if has_content_size {
+        let field_size = 1 << size_flag;
+
+        let mut buffer = vec![0; field_size];
+        input.read_exact(&mut buffer)?;
+
+        // Padding with extra zeros
+        let buffer = [buffer, vec![0; 8 - field_size]].concat();
+
+        let mut value = u64::from_le_bytes(buffer);
+
+        if size_flag == 2 {
+            // Special case
+            value += 256;
+        }
+
+        Some(value)
+    } else {
+        None
+    };
+
+    Ok(FrameDescriptor {
+        size_flag,
+        single_segment_flag,
+        checksum_flag,
+        dict_id_flag,
+        win_desc,
+        dict_id,
+        content_size,
+    })
+}
+```
+
+Not so bad? But it doesn't compile:
+
+```bash
+$ cargo check
+# ...
+error[E0308]: mismatched types
+   --> czar/src/lib.rs:113:33
+    |
+113 |         Some(u32::from_be_bytes(buffer))
+    |                                 ^^^^^^ expected array `[u8; 4]`, found struct `Vec`
+    |
+    = note: expected array `[u8; 4]`
+              found struct `Vec<u8>`
+
+error[E0308]: mismatched types
+   --> czar/src/lib.rs:124:44
+    |
+124 |         let mut value = u64::from_le_bytes(buffer);
+    |                                            ^^^^^^ expected array `[u8; 8]`, found struct `Vec`
+    |
+    = note: expected array `[u8; 8]`
+              found struct `Vec<u8>`
+# ...
+```
+
+The compiler just needs _a little convincing_ to trust us that there is no problem here.
+
+```rust
+// In zrs/czar/src/lib.rs
+
+use std::convert::TryInto;
+
+// ...
+
+        //                             👇
+        Some(u32::from_be_bytes(buffer.try_into().unwrap()))
+
+        // ...
+
+        //                                       👇
+        let mut value = u64::from_le_bytes(buffer.try_into().unwrap());
+
+```
+
+We can `unwrap` because we know the conversion will always succeed, so there is no risk of panicking.
+
+Let's put our efforts so far to the test. Make our frame descriptor debug-able:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+// 👇
+#[derive(Debug)]
+struct FrameDescriptor {
+    // ...
+}
+
+// 👇
+#[derive(Debug)]
+struct WindowDescriptor {
+    // ...
+}
+```
+
+so we can print their contents for debugging. Let's keep it simple:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+pub fn unpack<T: Read>(input: &mut T) -> Result<Vec<Block>, std::io::Error> {
+    let magic = get_magic(input)?;
+    let frame_descriptor = get_descriptor(input)?;
+
+
+    // 👇 Temporary, we'll change that later
+    println!("magic = {:?}", magic);
+    println!("frame_desc = {:?}", frame_descriptor);
+    unimplemented!()
+}
+```
+
+Then let's write a test that runs our `hello.txt.zst` file through this
+
+```rust
+// In zrs/czar/src/lib.rs
+
+#[cfg(test)]
+mod tests {
+    use crate::*;
+    #[test]
+    fn test_unpack() {
+        use std::fs::File;
+
+        let mut f = File::open("../assets/hello.txt.zst").unwrap();
+        unpack(&mut f).unwrap();
+    }
+}
+```
+
+Let's run this!
+
+```bash
+$ cargo test
+
+---- tests::test_unpack stdout ----
+magic = [40, 181, 47, 253]
+frame_desc = FrameDescriptor { size_flag: 0, single_segment_flag: true, checksum_flag: true, dict_id_flag: 0, win_desc: None, dict_id: None, content_size: Some(96) }
+thread 'tests::test_unpack' panicked at 'not implemented', czar/src/lib.rs:160:5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+```
+
+The panic is completely normal here! We left an `unimplemented!()` in the body of `unpack`. So it all goes through and tells us that the decompressed data size is 96 bytes which is exactly the length of our original file. Good!
+
+We also learn that there is a checksum at the end (it doesn't need to alway be present).
+
+# Blocks now
+
+Ok so we need to process blocks now. This will be very similar to the frame descriptor, and even a bit simpler:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+pub fn get_block<T: Read>(input: &mut T) -> Result<Block, std::io::Error> {
+    let mut buffer = vec![0; 3];
+    input.read_exact(&mut buffer)?;
+    buffer.push(0); // Pad with one zero
+    let byte_data = u32::from_le_bytes(buffer.try_into().unwrap());
+
+
+    let last_block = byte_data & 1 == 1; // Bit 0
+    let block_type = match (byte_data >> 1) & 3 {
+        // Bits 1-2
+        0 => BlockType::Raw,
+        1 => BlockType::Rle,
+        2 => BlockType::Compressed,
+        x => BlockType::UnknownBlockType(x as u8),
+    };
+    let block_size = byte_data >> 3; // Bits 3-23
+
+    let content_size = match block_type {
+        BlockType::Rle => 1,
+        _ => block_size,
+    };
+
+    // Get block content
+    let mut contents = vec![0; content_size as _];
+    input.read_exact(&mut contents)?;
+
+    Ok(Block {
+        last_block,
+        block_type,
+        block_size,
+        contents,
+    })
+}
+```
+
+Let's make out `BlockType` and `Block` structs derive the `Debug` trait, and test this
+
+```rust
+// In zrs/czar/src/lib.rs
+
+pub fn unpack<T: Read>(input: &mut T) -> Result<Vec<Block>, std::io::Error> {
+    let magic = get_magic(input)?;
+    let frame_descriptor = get_descriptor(input)?;
+
+    // 👇 Temporary, we'll change that later
+    let block = get_block(input)?;
+
+    println!("magic = {:?}", magic);
+    println!("frame_desc = {:?}", frame_descriptor);
+    // 👇
+    println!("block = {:?}", block);
+
+    unimplemented!()
+}
+```
+
+We get this:
+
+```rust
+magic = [40, 181, 47, 253]
+frame_desc = FrameDescriptor {
+    size_flag: 0,
+    single_segment_flag: true,
+    checksum_flag: true,
+    dict_id_flag: 0,
+    win_desc: None,
+    dict_id: None,
+    content_size: Some(96)
+}
+
+block = Block {
+    last_block: true,
+    block_type: Compressed,
+    block_size: 81,
+    contents: [194, /* ... */ 10]
+}
+```
+
+And no error was caused whatsoever! (except our deliberate `unimplemented!`).
+This looks good! Let's modify `unpack` to get blocks until we read the last one:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+pub fn unpack<T: Read>(input: &mut T) -> Result<Vec<Block>, std::io::Error> {
+    let magic = get_magic(input)?;
+    let frame_descriptor = get_descriptor(input)?;
+
+    let mut blocks = vec![];
+    loop {
+        // We assume at least one block is present
+        let block = get_block(input)?;
+        let is_last_block = block.last_block;
+
+        blocks.push(block);
+        if is_last_block {
+            break;
+        }
+    }
+
+    // Note: we are currently ignoring the checksum, if any
+
+    Ok(blocks)
+}
+```
+
+# Tidying up
+
+Are we finished? Well... not quite. There are two things that we haven't _quite_ handled yet:
+
+- We may want to return the `frame_descriptor` together with blocks, since it contains useful information for decompressing. This is left as an exercise to the reader.
+- We haven't checked the "magic" number, which has to match our expected value, and
+
+Nothing too bad, this is easy to do. But what should we do when the check fails?
+
+We should raise an error. But this is not an `std::io::Error`, it's something different. Let's define a struct for our errors:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+#[derive(Debug)]
+pub enum CzarError {
+    InvalidMagic,
+    IoError(std::io::Error)
+}
+```
+
+and replace all other occurences of `std::io::Error` by `CzarError`. We just need to tell the compiler how to convert:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+impl From<std::io::Error> for CzarError {
+    fn from(err: std::io::Error) -> Self {
+        Self::IoError(err)
+    }
+}
+```
+
+This is what unpack looks like right now, and it correctly parses our `hello.txt.zst`file:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+pub fn unpack<T: Read>(input: &mut T) -> Result<(FrameDescriptor, Vec<Block>), CzarError> {
+    let magic = get_magic(input)?;
+
+    if magic != MAGIC {
+        return Err(CzarError::InvalidMagic);
+    }
+
+    let frame_descriptor = get_descriptor(input)?;
+
+    let mut blocks = vec![];
+    loop {
+        // We assume at least one block is present
+        let block = get_block(input)?;
+        let is_last_block = block.last_block;
+
+        blocks.push(block);
+        if is_last_block {
+            break;
+        }
+    }
+
+    // Ignoring checksum if any
+
+    Ok((frame_descriptor, blocks))
+}
+
+```
+
+Exercise for the reader: extract the checksum as well!
+
+# Ok we're done now!
+
+Yes... well no... not quite done yet. But don't worry, it's almost nothing. Our ̀`czar` library can _unpack_ but it cannot _pack_. Let's fix that and we'll be feature-complete, pinky promise.
+
+```rust
+// In zrs/czar/src/lib.rs
+
+// 👇
+use std::io::Write;
+
+// ...
+
+// 👇
+pub fn pack<W: Write>(
+    output: &mut W,
+    frame_descriptor: FrameDescriptor,
+    blocks: &[Block],
+    checksum: Option<u32>
+) -> Result<(), CzarError> {
+    // Write magic number
+    output.write_all(&MAGIC)?;
+
+    // Write frame descriptor
+    write_descriptor(output, frame_descriptor)?;
+
+    for block in blocks {
+        write_block(output, block)?;
+    }
+
+    if let Some(value) = checksum {
+        // Add checksum
+        output.write_all(value.to_le_bytes())?;
+    }
+
+    output.flush()?;
+
+    Ok(())
+}
+
+// 👇
+fn write_descriptor<W: Write>(output: &mut W, desc: FrameDescriptor) -> Result<(), CzarError> {
+    let to_bit = |b| if b { 1 } else { 0 };
+
+    // Mandatory fields
+    let first_byte = desc.dict_id_flag
+        + (to_bit(desc.checksum_flag) << 2)
+        + (to_bit(desc.single_segment_flag) << 5)
+        + (desc.size_flag << 5);
+
+    output.write_all(&[first_byte])?;
+
+    // Window descriptor
+    if let Some(value) = desc.win_desc {
+        let byte = value.mantissa + value.exponent >> 2;
+        output.write_all(&[byte])?;
+    }
+
+    // Dictionary ID
+    if let Some(value) = desc.dict_id {
+        let bytes = value.to_le_bytes();
+        // Truncate
+        let bytes = &bytes[..desc.dict_id_flag as _];
+        output.write_all(bytes)?;
+    }
+
+    // Content size
+    if let Some(value) = desc.content_size {
+        let field_size = 1 << desc.size_flag;
+        let bytes = value.to_le_bytes();
+        // Truncate
+        let bytes = &bytes[..field_size as _];
+        output.write_all(bytes)?;
+    }
+
+    Ok(())
+}
+
+// 👇
+fn write_block<W: Write>(output: &mut W, block: &Block) -> Result<(), CzarError> {
+    let to_bit = |b| if b { 1 } else { 0 };
+
+    let first_word = to_bit(block.last_block)
+        + (match block.block_type {
+            BlockType::Raw => 0,
+            BlockType::Rle => 1,
+            BlockType::Compressed => 2,
+            BlockType::UnknownBlockType(x) => x,
+        } << 1) as u32
+        + (block.block_size << 3);
+
+    // Truncate to 3 bytes
+    let bytes = first_word.to_le_bytes();
+    let bytes = &bytes[..3];
+    output.write_all(bytes)?;
+
+    // Write contents
+    output.write_all(&block.contents)?;
+
+    Ok(())
+}
+
+```
+
+There we are! We can now **pack and unpack** archives! Let's do a very simple sanity check: we'll unpack our file, and repack it. We should get the same file.
+
+We can then try to remove the checksum (if present).
+
+```rust
+// In zrs/czar/src/lib.rs
+
+    // ...
+
+    // 👇
+    #[test]
+    fn test_unpack_repack() -> Result<(), CzarError> {
+        use std::fs::File;
+
+        let mut f = File::open("../assets/hello.txt.zst")?;
+        let mut g = File::create("../assets/copycat.txt.zst")?;
+
+        let unpacked = unpack(&mut f)?;
+
+        // Remove checksum, leave rest unchanged
+        let (mut frame_descriptor, blocks, _checksum) = unpacked;
+        frame_descriptor.checksum_flag = false;
+
+        pack(&mut g, frame_descriptor, &blocks, None)?;
+
+        Ok(())
+    }
+```
+
+Let's try this:
+
+```bash
+$ cargo test
+# No error
+$ cd assets
+$ diff hello.txt.zst copycat.txt.zst
+Binary files hello.txt.zst and copycat.txt.zst differ
+$ zstd -d copycat.txt.zst
+copycat.txt.zst     : 96 bytes
+# Decompressed without error
+$ diff copycat.txt hello.txt
+# No difference
+```
+
+Now we can build valid Zstandard archives, yay! We can't really compress yet, though. Or can we? Let's conclude this post with an example:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+
+    // ...
+
+    // 👇
+    #[test]
+    fn test_rle_pack() -> Result<(), CzarError> {
+        use std::fs::File;
+        let mut f = File::create("../assets/creation.txt.zst")?;
+        let frame_descriptor = FrameDescriptor {
+            size_flag: 0,
+            single_segment_flag: true,
+            checksum_flag: false,
+            dict_id_flag: 0,
+            win_desc: None,
+            dict_id: None,
+            content_size: Some(13 + 14 + 15),
+        };
+
+        let block1 = Block {
+            last_block: false,
+            block_type: BlockType::Raw,
+            block_size: 13,
+            contents: b"Hello world!\n".to_vec(),
+        };
+
+        let block2 = Block {
+            last_block: false,
+            block_type: BlockType::Rle,
+            block_size: 14,
+            contents: b"=".to_vec(),
+        };
+
+        let block3 = Block {
+            last_block: true,
+            block_type: BlockType::Raw,
+            block_size: 15,
+            contents: b"Another block!\n".to_vec(),
+        };
+
+        pack(&mut f, frame_descriptor, &[block1, block2, block3], None)?;
+        Ok(())
+    }
+```
+
+This test creates a file that contains three blocks: the `Raw` blocks are just copied verbatim, whereas the `Rle` block is expanded to fill `block_size`. Lo and behold!
+
+```bash
+$ cargo test
+# No error
+$ cd assets/
+$ zstd -d creation.txt.zst
+creation.txt.zst    : 42 bytes
+# No error
+# A file creation.txt has appeared!
+$ cat creation.txt
+Hello world!
+==============Another block!
+```
+
+We can create perfectly valid Zstandard archives! We're done! Are we? No?
+
+Oh right, we have to address the inflatable elephant in the room: compression. In the next post we'll improve a little bit our current `czar` library, make it nicer and tidier, and start concerning ourselves with preparing _actually compressing files_.
+[Go to Part II]({% post_url 2021-09-19-entropy2 %}).
+
+[coffee]: https://www.buymeacoffee.com/shargs

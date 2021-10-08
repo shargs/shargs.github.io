@@ -1,0 +1,413 @@
+---
+layout: post
+title: "Writing ourselves an Zstandard codec in Rust. Part VI."
+date: 2021-10-04
+categories: data-compression
+description: In this post series, we attempt to write an Zstandard codec.
+---
+
+> _**Disclaimer:** this is not final. If you find mistakes, please report them._
+
+# Part VI: Custom distributions and the Huffman table
+
+This post is part of a series on entropy coding and writing our own Zstandard library in Rust.
+
+**Part**
+[I]({% post_url 2021-09-16-entropy1 %}) ·
+[II]({% post_url 2021-09-19-entropy2 %}) ·
+[III]({% post_url 2021-09-22-entropy3 %}) ·
+[IV]({% post_url 2021-09-24-entropy4 %}) ·
+[V]({% post_url 2021-09-28-entropy5 %})
+[VI]({% post_url 2021-10-04-entropy6 %})
+
+Welcome back to the series. In the last episode, we figured out how to extract tANS/FSE encoded streams, and could successfully decompress files. Two limitations were that we only supported predefined distributions, and raw-encoded literals.
+
+As it turns out, these are related problems, which we'll try to address today. Let's dig in!
+
+# Reminder: distributions
+
+You'll remember from our discussions of Huffman coding ([Part III]({% post_url 2021-09-22-entropy3 %})) and tANS/FSE coding ([Part IV]({% post_url 2021-09-24-entropy4 %})) that they rely on some knowledge of how often symbols appear in the data we try to compress. The more precise this knowledge, the better the compression rates that can be achieved, (up to a certain limit).
+
+Zstandard can use a set of "predefined" distributions, which we relied on in the previous post. That was convenient for us, but we can only go so far that way: we need to extract distributions from the compressed file when it is provided. (Plus, there are no "predefined" Huffman distributions.)
+
+Recall that in Zstandard, tANS/FSE can pop up in two different ways:
+
+- During sequence extraction (that's where we used the "predefined" distributions last time)
+- During literal extraction, if literals are Huffman coded
+
+Indeed, in the latter case, the **Huffman weights are themselves tANS/FSE coded**. (Yeah you read that right: we need to read (FSE) weights to decompress (Huffman) weights to decompress literals used to (LZ) decompress a block.)
+
+To make things _funnier_, it is not always the case that Huffman weights are compressed, but I found it was extremely common.
+
+When I reached this state in the project, **I honestly thought of giving up**. Some of the reasons are:
+
+- I have no incentive to go on. For all practical purposes I can use `zstd` and be done with it.
+- The spec is confusing to me. Maybe I need more example than the few given there. Maybe I need simple, _meaningful_ files that I can try to decompress.
+- Initially the point of this all was to understand tANS/FSE. I think we went quite far in that direction.
+- We've got the "big ideas" already. Now we're re-implementing basic stuff like Huffman coding and we've losing hair over how to read bitstreams.
+
+In fact, the main problem I now have is that _I don't know how to test my work_. I'm assuming that my tANS/FSE code for literals with predefined distributions and my LZ implementations are correct: to even _begin_ testing Huffman-compressed literals I'll have to
+
+- Read tANS/FSE tables
+- Decompress a tANS/FSE stream with that custom table
+- Read Huffman table
+- Decompress a Huffman stream with that custom table
+  If _any_ of these steps goes wrong, I'll get incorrect literals.
+
+I need to break this monolithic monstruosity in pieces, but it's not like I can easily get input/output pairs from either the spec or compressed files.
+
+Luckily for you, dear reader, I powered through and after a week of pulling my hair I managed to get _somewhere_.
+
+# Extracting distributions from files
+
+Huffman weights are _themselves compressed_, using tANS/FSE. And tANS/FSE uses its own distribution of weights to operate. Previously we could rely on the "predefined" weights, but no longer. When the distribution is not "predefined", it is stored in the file before the compressed stream.
+
+Our goal is to extract this distribution and use it to decompress the Huffman weights, which _hopefully_ will match the weights computed in the previous section.
+
+According to the spec,
+
+- The first four bits in the stream determine `accuracy`
+- Then weight for symbol 0 is stored, then weight for symbol 1, etc.
+
+Let's have a look at our bitstream:
+
+`00000101 10101101 10011100 ...`
+
+The first four bits are `0000`, to which we add 5 to get `accuracy = 5` (this value cannot exceed 9). What remains is
+
+`0101 10101101 10011100 ...`
+
+The number of bits used for each weight is variable. The "rule" is
+
+- We read $$k$$ bits into a value `val`, without consuming. The formula for $$k$$ is $$1 + \lfloor\log_2(r+1)\rfloor$ where $$r$$ is the remaining, unallocated weight (we start from `1 << accuracy`).
+- If `val` is "small", we actually only consume $$k-1$$ bits
+- If `val` is equal to 1, this is a special case: the weight is zero **and** the next two bits immediately following form a value `flag` that indicates how many weights after the current one also have weight 0.. If `flag = 3`, then not only the three next weights are 0, but the next two bits immediately following give a new repeat `flag`, etc.
+- Otherwise, the weight is just `val - 1`, keeping in mind that the weight can be `-1`.
+
+To total weight (special value -1 counts as 1) should be exactly `1 << accuracy`.
+
+So let's try to read the first weight. According to the formula we read $$k = 6$$ bits, which gives `010110 = 26`, which qualifies as a small value, therefore we only actually consume 5 bits of the bitstream, and give symbol 0 a weight of 25.
+
+Going through this we get weights $$(25, 1, 2, 2, 1, 1)$$ totalling $$2^5 = 32$$ as expected. We only have 6 symbols there.
+
+Finally, if necessary, we consume some bits until a round number of bytes has been consumed. For us, we have consumed a total of 22 bits meaning there are two extra bits to discard
+
+    `00000101  10101101  100111 00  00000001`,
+    `                           ^^`
+
+After that, it should be the tANS/FSE stream. Should be.
+
+Using the distribution we build a table and look for the initial state, which should be given by the 5 first bits. Thats **not** `00000`: remember we read tANS/FSE streams in reverse!
+
+> I'm reagining some confidence here. This is _reasonable_. I have no way to test for now but I think we have the tANS/FSE distribution right! And that means we should have the right decoding table. On we go!
+
+# Decompressing weights
+
+We just have to decode the stream with the table and... **_Psych!_** You thought it'd be easy didn't you.
+
+Truth is, **we need two decoders**.
+
+The reason for this is not made explicit in the specifications, but I suspect this is related [to this paper by Fabian Giesen][rygpaper]: interleaved encoders/decoders can in theory leverage instruction-level parallelism or SIMD instructions to achieve noticeable speedups. (Maybe that's not the reason at all, and this is related to how odd and even symbols happen to be distributed? If you know, let me know.)
+
+Decoder number 1 and 2 will share the same decoding table, and take turn at reading the input.
+
+```rust
+// File: zrs/zarc/src/decompress.rs
+
+// ...
+
+fn extract_huffman_table(input: &[u8]) -> (usize, huffman::HuffmanTable) {
+    let first_byte = input[0];
+
+    let huffman_header = match first_byte {
+        0..=127 => HuffmanHeader::Fse(first_byte),
+        x => HuffmanHeader::Plain(x - 127),
+    };
+
+    let mut huffman_weights = vec![];
+
+    match huffman_header {
+        HuffmanHeader::Fse(csize) => {
+            // Extract tANS/FSE distribution
+            let bitstream = (&input[1..]).view_bits::<Lsb0>().to_bitvec();
+            let (fse_weights, accuracy, skip) = fse::load_fse_weights(&bitstream);
+            let dtable = fse::DTable::from_weights(&fse_weights, accuracy);
+
+            // Skip FSE weights and trim to length
+            let csize = csize - skip as u8;
+            let bitstream = (&input[1 + skip..]).view_bits::<Lsb0>();
+            let padding =
+                8 - fse::highest_set_bit(input[1 + skip..][csize as usize - 1] as u64).unwrap();
+            let offset = csize * 8 - padding as u8;
+            let bitstream = &bitstream[..offset as usize];
+            let mut bitstream = bitstream.to_bitvec();
+
+            // Two decoders
+            let mut decoder1 = fse::Decoder::use_table(dtable.clone(), accuracy);
+            let mut decoder2 = fse::Decoder::use_table(dtable, accuracy);
+
+            // Initial states
+            huffman_weights.push(decoder1.load_initial_state(&mut bitstream));
+            huffman_weights.push(decoder2.load_initial_state(&mut bitstream));
+
+            loop {
+                huffman_weights.push(decoder1.decoder_step(&mut bitstream));
+                huffman_weights.push(decoder2.decoder_step(&mut bitstream));
+
+                if huffman_weights.len() > 256 {
+                    // Can't have more than 256 symbols
+                    break;
+                }
+            }
+
+            // TODO
+        }
+        _ => {
+            unimplemented!("Huffman header unsupported {:?}", huffman_header)
+        }
+    }
+}
+```
+
+Looks nice enough! But if we try to run this as is, we'll run into trouble soon enough: What if there's an odd number of weights? Then `decoder2` shouldn't be updated in the last round.
+
+But we don't know how many weights there are! In fact, even if we knew, the condition for breaking the `loop` is absolutely dirty: if there aren't enough bits to step a decoder, then the missing bits are assumed to be 0 and we exit the loop.
+
+To capure this, we'll need to refactor a little bit: turn the return type of `decoder_step` into an `Option<u8>` so that we can catch the situation of "not having enough bits to decode" and convey this to the caller.
+
+```rust
+// File: zrs/zarc/src/fse.rs
+
+// ...
+impl Decoder {
+
+    // ...
+
+    //                                                                       New!
+    pub fn decoder_step(&mut self, bitstream: &mut BitVec<LocalBits, u8>) -> Option<u8> {
+        let dtable_entry = &self.dtable.table[self.state.unwrap()];
+        let nb_bits = dtable_entry.nb_bits as usize;
+        let baseline = dtable_entry.baseline;
+
+        let len = bitstream.len();
+
+        // New!
+        if len < nb_bits {
+            // Not enough bits to update state
+            return None;
+        }
+
+        // ..
+
+        // Output corresponding symbol
+        // New!
+        Some(self.dtable.table[new_state].symbol)
+    }
+}
+```
+
+That forces us to change how we call into the decoder in two places: right where we were, with our interleaved business, but also when reading sequences --- our efforts from last episode. If we run out of bits in **that** latter scenario, that's an error, and we want to report it.
+
+As an exercice to the reader: we create a new `CzarError` and update the return type of `get_sequences` to return a `Result<Vec<LzSequence>, CzarError>`. We also update `process_compressed_block` to report an error if any.
+
+Let's update our loop:
+
+```rust
+// File: zrs/zarc/src/decompress.rs
+
+// ...
+
+fn extract_huffman_table(input: &[u8]) -> (usize, huffman::HuffmanTable) {
+    // ...
+    loop {
+        let even_weight = decoder1.decoder_step(&mut bitstream);
+        let odd_weight = decoder2.decoder_step(&mut bitstream);
+
+        if let Some(weight) = even_weight {
+            huffman_weights.push(weight);
+        } else {
+            break;
+        }
+
+        if let Some(weight) = odd_weight {
+            huffman_weights.push(weight);
+        } else {
+            break;
+        }
+
+        if huffman_weights.len() > 255 {
+            break;
+        }
+    }
+
+    // TODO
+}
+```
+
+Better, but not quite there yet: remember, we don't just want to `break`, we want to try and read that last weight, adding zeros to the stream if needed. Rather than modifying the stream we'll just add a special function to the decoder.
+
+```rust
+// File: zrs/zarc/src/decompress.rs
+
+// ...
+
+fn extract_huffman_table(input: &[u8]) -> (usize, huffman::HuffmanTable) {
+    // ...
+    loop {
+        let even_weight = decoder1.decoder_step(&mut bitstream);
+        let odd_weight = decoder2.decoder_step(&mut bitstream);
+
+        if let Some(weight) = even_weight {
+            huffman_weights.push(weight);
+        } else {
+            // New
+            if bitstream.len() > 0 {
+                huffman_weights.push(decoder1.decoder_step_nofail(&mut bitstream));
+            }
+            break;
+        }
+
+        if let Some(weight) = odd_weight {
+            huffman_weights.push(weight);
+        } else {
+            // New
+            if bitstream.len() > 0 {
+                huffman_weights.push(decoder2.decoder_step_nofail(&mut bitstream));
+            }
+        }
+
+        if huffman_weights.len() > 255 {
+            break;
+        }
+    }
+
+    // TODO
+}
+```
+
+```rust
+// File: zrs/zarc/src/fse.rs
+
+// ...
+
+impl Decoder {
+    // ...
+
+    // New
+    pub fn decoder_step_nofail(&mut self, bitstream: &mut BitVec<LocalBits, u8>) -> u8 {
+        let dtable_entry = &self.dtable.table[self.state.unwrap()];
+        let nb_bits = dtable_entry.nb_bits as usize;
+        let baseline = dtable_entry.baseline;
+
+        // Read however many bits are available
+        let offset_data = bitstream;
+        let offset = bits_to_integer(&offset_data);
+        // Move to new state
+        let new_state = offset + baseline;
+        self.state = Some(new_state);
+
+        // Output corresponding symbol
+        self.dtable.table[new_state].symbol
+    }
+}
+```
+
+With that, we get some weights and with those weights, we get a Huffman table
+
+```rust
+// File: zrs/zarc/src/decompress.rs
+
+// ...
+
+fn extract_huffman_table(input: &[u8]) -> (usize, huffman::HuffmanTable) {
+    // ...
+
+    // Build Huffman table from weights
+    (
+        header_size,
+        huffman::HuffmanTable::from_weights(&huffman_weights),
+    )
+}
+```
+
+Let's try that on an test file containing the text
+
+    Are those shy Eurasian footwear, cowboy chaps, or jolly earthmoving headgear?
+
+which is then conmpressed with `zstd`. We get something that has `Compressed` literals. Our code to extract the tANS/FSE table gets $$[25, 1, 2, 2, 1, 1]$$ as discussed in a section above, and from this we extract the Huffman table
+
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+0, 2, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+0, 4, 2, 3, 2, 4, 2, 3, 4, 3, 2, 0, 3, 1, 3, 5,
+1, 0, 4, 4, 3, 1, 1, 3, 0
+
+How do we know that it is correct? One easy test is that non-zero entries correspond to symbols appearing in the original text. If we do that, we get the following symbols
+
+`\n ,?AEabcdefghijlmnoprstuvw`
+
+Looks good, what are the letters that _do_ appear in our text?
+
+`\n ,?AEacbedgfihjmlonpsrutwvy`
+
+That's... **wait** they don't match. There's this extra `y` there. Here's the thing: Zstandard does not store the _last symbol_ in the table.
+
+Why? Simply because we don't need to store it: we can deduce it from other weights. The procedure is as follows:
+
+- Compute $$s = \sum_{w_i \neq 0} 2^{w_i - 1}$$
+- Find the smallest power of 2 larger than $$s$$, call it $$2^k$$
+- Then the last weight is $$2^k - s$$.
+
+With our table above, we find $$s = 124$$, so $$p = 128 = 2^7$$, and `y` has weight $$128-124 = 4$$. (As a sanity check, `y` and `t` both appear 3 times in the text, and have the same weight, so we're at least in the right ballpark.)
+
+```rust
+// File: zrs/zarc/src/decompress.rs
+
+// ...
+
+fn extract_huffman_table(input: &[u8]) -> (usize, huffman::HuffmanTable) {
+    // ...
+
+    // New!
+    // Compute last weight
+    if huffman_weights.len() < 256 {
+        let mut s = 0u64;
+        for &w_i in huffman_weights.iter() {
+            if w_i != 0 {
+                s += 1 << (w_i - 1);
+            }
+        }
+        let mut p = 1;
+        for _ in 0..63 {
+            if p > s {
+                break;
+            }
+            p = p << 1;
+        }
+        huffman_weights.push((p - s) as u8);
+    }
+
+    // Build Huffman table from weights
+    (
+        header_size,
+        huffman::HuffmanTable::from_weights(&huffman_weights),
+    )
+}
+```
+
+And with **that**, we seem to have almost all we need to decode Huffman-coded literals.
+
+# It's a good place to stop
+
+This post took much longer to write, and rewrite, than it seems. Figuring out the _exact_ offsets and bit positions to read from what mindbendingly difficult from the spec, and took many back and forths to get right.
+
+The prize we get is our decompressor will be able to support custom tANS/FSE tables everywhere we could need them, and we are mostly done with Huffman coding. So if all goes according to _keikaku_ in the next post we put these things together and we should support at least a majority honest-to-goodness `zstd` compressed files. Of course, we may still have obstacles ahead, but they won't be theoretical. Or will they? We'll see. **_Stay tuned!_**
+
+_Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
+
+[rygpaper]: https://arxiv.org/abs/1402.3392
+[wpcanhuf]: https://en.wikipedia.org/wiki/Canonical_Huffman_code
+[coffee]: https://www.buymeacoffee.com/shargs

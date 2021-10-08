@@ -1,0 +1,572 @@
+---
+layout: post
+title: "Writing ourselves an Zstandard codec in Rust. Part II."
+date: 2021-09-19
+categories: data-compression
+description: In this post series, we attempt to write an Zstandard codec.
+---
+
+> _**Disclaimer:** this is not final. If you find mistakes, please report them._
+
+# Part II: Packing, unpacking, checksum
+
+This post is part of a series on entropy coding and writing our own Zstandard library in Rust.
+
+**Part**
+[I]({% post_url 2021-09-16-entropy1 %}) ·
+[II]({% post_url 2021-09-19-entropy2 %}) ·
+[III]({% post_url 2021-09-22-entropy3 %}) ·
+[IV]({% post_url 2021-09-24-entropy4 %}) ·
+[V]({% post_url 2021-09-28-entropy5 %})
+[VI]({% post_url 2021-10-04-entropy6 %})
+
+Welcome back to the series. In the last episode we created as part of this project the `czar` library, responsible for handling Zstandard `.zst` files, or rather "frames" as they are called in the specification.
+
+It is not yet a fully-featured `zstd` equivalent, far from it. Today, we'll add some of the missing features:
+
+- Compute the checksum and check it
+- Create an archive from user-provided data
+- Extract the contents of this archive
+
+Our library also lacked some user-friendliness and maybe we should start with this first.
+
+# Better error messages
+
+The way we handle errors is we return a `CzarError`:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+#[derive(Debug)]
+pub enum CzarError {
+    InvalidMagic,
+    IoError(std::io::Error),
+}
+```
+
+That's only _two_ errors. But there are many places where errors can occur in reading a user-provided archive, and if we want to help ourselves when debugging (as well as future library users) we need to be slightly more specific about what exactly went wrong.
+
+We'll do that in two steps: first, we'll try to reduce the number of different errors raised by a function to a minimum, except for "high-level" functions (such as `unpack`). Then, in such "high-level" functions, we'll raise an error explaining the failure and its cause.
+
+Let's start with `get_descriptor`. First we revert its signature back to using `std::io::Error`, which is the only error it can raise:
+
+```rust
+fn get_descriptor<T: Read>(input: &mut T) -> Result<FrameDescriptor, std::io::Error>
+```
+
+Then introduce a dedicated error, raised during `unpack`:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+#[derive(Debug)]
+pub enum CzarError {
+    InvalidMagic,
+    IoError(std::io::Error),
+
+    // New!
+    InvalidDescriptor(std::io:Error),
+}
+
+// ...
+
+pub fn unpack<T: Read>(
+    input: &mut T,
+) -> Result<(FrameDescriptor, Vec<Block>, Option<u32>), CzarError> {
+    // ...
+
+    // Old
+    let frame_descriptor = get_descriptor(input)?;
+
+    // New!
+    let frame_descriptor = match get_descriptor(input) {
+        Ok(desc) => desc,
+        Err(ioerr) => return Err(CzarError::InvalidDescriptor(ioerr)),
+    };
+
+    // ...
+}
+```
+
+We've done almost nothing there, just wrapping the error, but that way, if an IO error causes an descriptor to be invalid, we'll known _that the descriptor was invalid_ and _that it was caused by an IO error_. Previously we only knew some IO error occured. So that's better now.
+
+Let's do the same thing with `get_block`: change its error type back to `std::io::Error` then
+
+```rust
+// In zrs/czar/src/lib.rs
+
+#[derive(Debug)]
+pub enum CzarError {
+    InvalidMagic,
+    IoError(std::io::Error),
+    InvalidDescriptor(std::io:Error),
+
+    // New!
+    IncompleteBlock(std::io::Error),
+}
+
+// ...
+
+pub fn unpack<T: Read>(
+    input: &mut T,
+) -> Result<(FrameDescriptor, Vec<Block>, Option<u32>), CzarError> {
+
+    // ...
+
+    // Old
+    let block = get_block(input)?;
+
+    // New
+    let block = match get_block(input) {
+        Ok(block) => block,
+        Err(ioerr) => return Err(CzarError::IncompleteBlock(ioerr)),
+    };
+
+    // ...
+}
+```
+
+Let as exercise to the reader: add a `IncompleteChecksum` error which is raised when failing to get a checksum.
+
+We now have a better idea of what fails during unpacking.
+
+# Archive creation
+
+Last time, we manually used our data structures and the `pack` function to assemble a Zstandard archive. We could then successfully run `zstd` to decompress it. It is time to start automating this process.
+
+We create a new crate in the workspace, respondible for Zstandard archive compression --- or in short, `zarc`:
+
+```toml
+# In zrs/Cargo.toml
+[workspace]
+members = [
+  "czar",
+  "zarc",   # New!
+]
+```
+
+```bash
+$ cargo new --lib zarc
+Created library `zarc` package
+```
+
+```toml
+# In zrs/zarc/Cargo.toml
+
+[package]
+edition = "2021"
+name = "zarc"
+version = "0.1.0"
+
+[dependencies]
+czar = {path = "../czar"}
+```
+
+As indicated in the TOML file, `zarc` will rely on `czar`. We'll export a function that takes some input, compresses it, and writes the result in some output:
+
+```rust
+// In zrs/zarc/src/lib.rs
+
+use std::io::{Read, Write};
+
+pub fn compress<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), czar::CzarError> {
+    // TODO
+}
+```
+
+Since we already wrote the `pack` function,all we need to figure out is :
+
+- What frame descriptor to use
+- How to chop up the input into blocks
+- How to compute the checksum (which is optional)
+
+Let's start easy: we'll only consider `Raw` blocks in a first time.
+
+> Recall that there are three types of block: `Raw` (which are not compressed), `Rle` (which are RLE compressed), and ̀`Compressed` (which are compressed with ANS).
+
+So what we do now is simply cut the input into slices:
+
+```rust
+// In zrs/zarc/src/lib.rs
+
+use czar::{Block, BlockType};
+
+use std::{
+    io::{Read, Write},
+};
+
+pub fn compress<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), czar::CzarError> {
+    let mut blocks = vec![];
+    let mut buffer = vec![];
+    input.read_to_end(&mut buffer)?;
+
+    let in_size = buffer.len();
+    let max_block_size = 1 << 20; // Arbitrary
+
+    for i in (0..in_size).step_by(max_block_size) {
+        let last_block = in_size - i < max_block_size;
+        let block_size = if last_block {
+            in_size - i
+        } else {
+            max_block_size
+        } as u32;
+
+        // Temporary: only Raw
+        let block_type = BlockType::Raw;
+        let contents = (&buffer[i..block_size as usize]).to_vec();
+
+        let block = Block {
+            last_block,
+            block_type,
+            block_size,
+            contents,
+        };
+
+        blocks.push(block);
+    }
+
+    // TODO: compute checksum
+    // TODO: determine frame descriptor
+    // TODO: pack
+
+    Ok(())
+}
+```
+
+We've got a small problem here: `BlockType` isn't public, and `Block`'s fields are private too. Let's change that by using the `pub` keyword there. On to the frame descriptor!
+
+For now, let's keep it simple and `pub` all its fields too:
+
+```rust
+// In zrs/czar/src/lib.rs
+
+// ...
+
+#[derive(Debug)]
+pub struct FrameDescriptor {
+    // Mandatory fields
+    pub size_flag: u8,             // Whether decompressed size is included
+    pub single_segment_flag: bool, // Whether decompressed data is contiguous
+    pub checksum_flag: bool,       // Whether we add a checksum at the end
+    pub dict_id_flag: u8,          // Size of dictionary ID (if provided)
+
+    // Optional fields
+    pub win_desc: Option<WindowDescriptor>, // Helps allocate memory
+    pub dict_id: Option<u32>,               // Dictionary ID
+    pub content_size: Option<u64>,          // Size of decompressed data
+}
+
+// ...
+```
+
+```rust
+// In zrs/zarc/src/lib.rs
+
+pub fn compress<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), czar::CzarError> {
+    // ...
+
+    let (size_flag, content_size) = get_size_descriptor(in_size);
+
+    // Temporary
+    let frame_descriptor = FrameDescriptor {
+        size_flag,
+        single_segment_flag: true,
+        checksum_flag: false,
+        dict_id_flag: 0,
+        win_desc: None,
+        dict_id: None,
+        content_size: Some(content_size),
+    };
+
+    // TODO: compute checksum
+
+    czar::pack(output, frame_descriptor, &blocks, None)?;
+
+    Ok(())
+}
+```
+
+This ad hoc frame descriptor is just there to make this archive works, it just sets the necessary minimum. The `get_size_descriptor` function determines what flag to use:
+
+```rust
+// In zrs/zarc/src/lib.rs
+
+fn get_size_descriptor(in_size: usize) -> (u8, u64) {
+    const _2_32: usize = (1 << 32) - 1;
+    match in_size {
+        0..=255 => (0, in_size as u64),
+        256..=65535 => (1, (in_size - 256) as u64),
+        65536..=_2_32 => (2, in_size as u64),
+        _ => (3, in_size as u64),
+    }
+}
+```
+
+Let's try this:
+
+```rust
+// In zrs/zarc/src/lib.rs
+
+#[cfg(test)]
+mod tests {
+    use crate::*;
+    #[test]
+    fn test_raw() -> Result<(), czar::CzarError> {
+        use std::fs::File;
+
+        let mut message = "Hello world of Zstandard!\n".as_bytes();
+        let mut f = File::create("../assets/archive.txt.zst")?;
+
+        compress(&mut message, &mut f)?;
+
+        Ok(())
+    }
+}
+```
+
+```bash
+$ cargo test -p zarc
+$ cd ../assets
+$ zstd -d archive.txt.zst
+archive.txt.zst     : 26 bytes
+$ car archive.txt
+Hello world of Zstandard!
+```
+
+Success!
+
+No? Okay we're not _actually compressing_ anything here. But we do have well-formed archives.
+
+# The checksum
+
+Oh right, there's still one small thing we haven't discussed. The checksum: after all blocks have been pushed, we can optionally add a `u32` value acting as a checksum _for the decompressed data_. This way, if we somehow messed up decompression, we may be able to detect it.
+
+The content checksum is the result of the `xxh64` hash function on the decompressed data with a seed of zero, of which the 4 lowest bytes are are stored in little-endian format.
+
+It turns out a `twox-hash` crate exists with a Rust implementation of this particular hash function, so let's use it!
+
+```bash
+# In zrs/zarc
+$ cargo add twox-hash
+```
+
+```rust
+// In zrs/zarc/src/lib.rs
+
+// ...
+
+use core::hash::Hasher;
+
+fn compute_checksum(input: &[u8]) -> u32 {
+    // Compute xxh64 of input
+    let mut hasher = twox_hash::XxHash64::with_seed(0);
+    hasher.write(input);
+    let hash_value = hasher.finish();
+
+    // Keep only 4 lowest bytes
+    let lower_word = (hash_value & 0xffffffff) as u32;
+
+    lower_word
+}
+```
+
+Could it be that simple?
+
+```rust
+// In zrs/zarc/src/lib.rs
+
+// ...
+
+pub fn compress<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), czar::CzarError> {
+
+    // ..
+
+    let checksum = compute_checksum(&buffer);   // New!
+
+    for i in (0..in_size).step_by(max_block_size) {
+        // ...
+    }
+
+    let (size_flag, content_size) = get_size_descriptor(in_size);
+
+    // Temporary
+    let frame_descriptor = FrameDescriptor {
+        size_flag,
+        single_segment_flag: true,
+        checksum_flag: true,                    // New!
+        dict_id_flag: 0,
+        win_desc: None,
+        dict_id: None,
+        content_size: Some(content_size),
+    };
+
+    czar::pack(
+        output,
+        frame_descriptor,
+        &blocks,
+        Some(checksum),                         // New!
+    )?;
+
+    Ok(())
+}
+```
+
+```bash
+$ cargo test -p zarc
+$ cd ../assets
+$ zstd -d archive.txt.zst
+archive.txt.zst     : 26 bytes
+# No error
+```
+
+It _is_ that simple! Who knew. Easy!
+
+Unless... okay there's _one tiny little detail_, so let me highlight it now. We're putting all our input at once into the `compute_checksum` function. When we have only a couple bytes as in our example, it doesn't matter. But when we'll be digesting terabytes of data, we won't be able to have all this in memory at once. The "right" way to do things would be to proceed **block-per-block**, updating the hash along.
+
+The reason we don't do that right now is that, well, we are _already_ storing all our input in memory (in `buffer`) anyway. At some point we'll need to address that, only read as much as we can chew, block per block, and compute the hash along. But not today.
+
+Today we celebrate.
+
+# Decompression
+
+Let's keep up the good work: time to decompress!
+
+The `unpack` function we've updated earlier is enough to handle the kind of files our `compress` produces. Let's do some refactoring first:
+
+```bash
+$ cd zarc/src
+$ mv lib.rs compress.rs
+```
+
+```rust
+// In zrs/zarc/src/lib.rs
+
+pub mod compress;
+pub mod decompress;
+
+use core::hash::Hasher;
+
+// Moved from compress.rs
+fn compute_checksum(input: &[u8]) -> u32 {
+    //  ...
+}
+
+// Moved from compress.rs
+#[cfg(test)]
+mod tests {
+    // ...
+}
+```
+
+```rust
+// In zrs/zarc/src/compress.rs
+
+use crate::compute_checksum; // Now in lib.rs
+
+// ...
+```
+
+```rust
+// In zrs/zarc/src/decompress.rs
+
+use czar::{Block, BlockType, FrameDescriptor};
+use std::io::{Read, Write};
+use crate::compute_checksum;
+
+pub fn decompress<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), czar::CzarError> {
+    let (frame_descriptor, blocks, checksum) = czar::unpack(input)?;
+    // TODO
+}
+```
+
+What do we do now? We'll start simple: ignoring the frame descriptor, we'll proceed through blocks. If the blocks are `Raw` we merely copy their contents to the output:
+
+```rust
+// In zrs/zarc/src/decompress.rs
+
+pub fn decompress<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), czar::CzarError> {
+    let (_frame_descriptor, blocks, checksum) = czar::unpack(input)?;
+
+    let mut result = vec![];
+    for block in blocks {
+        match block.block_type {
+            BlockType::Raw => result.extend(block.contents),
+            _ => unimplemented!(),
+        }
+    }
+
+    // TODO: checksum
+
+    output.write_all(&result)?;
+    output.flush()?;
+
+    Ok(())
+}
+```
+
+Ok let's try this:
+
+```rust
+// In zrs/zarc/src/lib.rs
+// ...
+
+#[cfg(test)]
+mod tests {
+    // ...
+
+    #[test]
+    fn test_draw() -> Result<(), czar::CzarError> {
+        use std::fs::File;
+
+        let mut f = File::open("../assets/archive.txt.zst")?;
+        let mut g = File::create("../assets/archive.txt")?;
+
+        decompress::decompress(&mut f, &mut g)?;
+
+        Ok(())
+    }
+}
+```
+
+```bash
+$ cargo test -p zarc
+$ cd ../assets
+$ cat archive2.txt
+Hello world of Zstandard!
+# No error occured
+```
+
+As an exercise to the reader, perform the checksum verification (when the checksum is provided), raising an error when a mismatch happens.
+
+Our decompressor has the same limitation as our compressor, namely we also put all of the input (and the output, which may be orders of magnitude larger!) in memory. This is bad practice. This is dangerous. And this is not necessary. Here too we'll want to only have one block in memory at a time. We'll do this. _I promise_. We'll do this. At some later point.
+
+Before that, there's one sweet low-hanging fruit we can't resist picking. Decompressing `Rle` blocks just means repeating the same symbol. It is so easy even I can do it, so let's do it (and cause errors for bad blocks too)
+
+```rust
+// In zrs/zarc/src/decompress.rs
+
+pub fn decompress<R: Read, W: Write>(input: &mut R, output: &mut W) -> Result<(), czar::CzarError> {
+
+    // ...
+
+    for block in blocks {
+        match block.block_type {
+        match block.block_type {
+            BlockType::Raw => result.extend(block.contents),
+
+            // New!
+            BlockType::Rle => result.extend(vec![block.contents[0]; block.block_size as usize]),
+            BlockType::Compressed => unimplemented!(),
+            BlockType::UnknownBlockType(x) => return Err(CzarError::InvalidBlockType(x)),
+        }
+    }
+
+    // ...
+}
+```
+
+And just like that we cover 2 out of 3 valid cases! Enough for one day. Next time we'll look into _actually compressing data_. [Go to Part III]({% post_url 2021-09-22-entropy3 %}).
+
+_Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
+
+[coffee]: https://www.buymeacoffee.com/shargs
