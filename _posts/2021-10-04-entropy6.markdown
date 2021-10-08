@@ -52,7 +52,8 @@ In fact, the main problem I now have is that _I don't know how to test my work_.
 - Decompress a tANS/FSE stream with that custom table
 - Read Huffman table
 - Decompress a Huffman stream with that custom table
-  If _any_ of these steps goes wrong, I'll get incorrect literals.
+
+If _any_ of these steps goes wrong, I'll get incorrect literals.
 
 I need to break this monolithic monstruosity in pieces, but it's not like I can easily get input/output pairs from either the spec or compressed files.
 
@@ -79,7 +80,7 @@ The first four bits are `0000`, to which we add 5 to get `accuracy = 5` (this va
 
 The number of bits used for each weight is variable. The "rule" is
 
-- We read $$k$$ bits into a value `val`, without consuming. The formula for $$k$$ is $$1 + \lfloor\log_2(r+1)\rfloor$ where $$r$$ is the remaining, unallocated weight (we start from `1 << accuracy`).
+- We read $$k$$ bits into a value `val`, without consuming. The formula for $$k$$ is $$1 + \lfloor\log_2(r+1)\rfloor$$ where $$r$$ is the remaining, unallocated weight (we start from `1 << accuracy`).
 - If `val` is "small", we actually only consume $$k-1$$ bits
 - If `val` is equal to 1, this is a special case: the weight is zero **and** the next two bits immediately following form a value `flag` that indicates how many weights after the current one also have weight 0.. If `flag = 3`, then not only the three next weights are 0, but the next two bits immediately following give a new repeat `flag`, etc.
 - Otherwise, the weight is just `val - 1`, keeping in mind that the weight can be `-1`.
