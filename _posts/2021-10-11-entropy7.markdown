@@ -142,8 +142,6 @@ def build_huff_table(symbols, weights, max_bits):
     pairs = zip(weights, symbols)
     pairs.sort()
 
-    current_pos = 0
-
     for weight, symbol in pairs:
         if weight == 0:
             continue
@@ -151,9 +149,7 @@ def build_huff_table(symbols, weights, max_bits):
         code_len = max_bits + 1 - weight
         copies = 1 << (weight - 1)
 
-        for i in range(copies):
-            table[current_pos + i] = (symbol, code_len)
-        current_pos += copies
+        table += [(symbol, code_len)] * copies
 
     return table
 
