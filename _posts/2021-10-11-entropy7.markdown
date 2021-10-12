@@ -1,0 +1,499 @@
+---
+layout: post
+title: "Writing ourselves an Zstandard codec in Rust. Part VII."
+date: 2021-10-11
+categories: data-compression
+description: In this post series, we attempt to write an Zstandard codec.
+---
+
+> _**Disclaimer:** this is not final. If you find mistakes, please report them._
+
+# Part VII: Huffman decoding
+
+This post is part of a series on entropy coding and writing our own Zstandard library in Rust.
+
+**Part**
+[I]({% post_url 2021-09-16-entropy1 %}) ·
+[II]({% post_url 2021-09-19-entropy2 %}) ·
+[III]({% post_url 2021-09-22-entropy3 %}) ·
+[IV]({% post_url 2021-09-24-entropy4 %}) ·
+[V]({% post_url 2021-09-28-entropy5 %}) ·
+[VI]({% post_url 2021-10-04-entropy6 %}) ·
+[VII]({% post_url 2021-10-11-entropy7 %})
+
+Welcome back to the series, a neverending succession of highs and lows. In the last episode, we implemented the necessary logic to extract tANS/FSE tables from a file, which we used to decompress Huffman weights (using two interleaved decoders, _how fun_).
+Today, we'll stare some more at Huffman coding --- and especially *de*coding --- in the context of Zstandard. This will be a "high".
+
+# Huffman decoding
+
+We already discussed Huffman coding in this series (here: [Part III]({% post_url 2021-09-22-entropy3 %})). We did not discuss _decoding_ that much though, and that's somethine we'll need now.
+
+Recall that Huffman coding essentially maps each symbol to a variable-length bitstring. This process is relatively easy once we've established the appropriate dictionary: our Huffman coding table.
+
+<center>
+<script type="text/tikz">
+\begin{tikzpicture}
+    \node at (0, 0) {A};            \node[anchor=west] at (2, 0) {1};
+    \node at (0, -1) {B};           \node[anchor=west] at (2, -1) {01};
+    \node at (0, -2) {C};           \node[anchor=west] at (2, -2) {001};
+    \node at (0, -3) {Z};           \node[anchor=west] at (2, -3) {000};
+    \draw[>=latex,->] (0.5, 0) to (1.5, 0);
+    \draw[>=latex,->] (0.5, -1) to (1.5, -1);
+    \draw[>=latex,->] (0.5, -2) to (1.5, -2);
+    \draw[>=latex,->] (0.5, -3) to (1.5, -3);
+\end{tikzpicture}
+</script>
+<br/>
+<em>Fig. 1: Huffman coding table.</em>
+
+</center>
+<br/>
+
+With tha above table, a message such as `ABCABC` would turn into the binary string`101001101001` --- great. How do we recover the message from this bitstring?
+
+The "textbook" version that all children learn at school is simple enough: to construct the coding table, we had a prefix tree --- a special kind of binary tree. Its leaves are our symbols, and paths from the root to a leaf give the codeword. How elegant.
+
+<center>
+<script type="text/tikz">
+\begin{tikzpicture}
+    \draw[fill=black] (0,0) circle (0.5mm); \node at (0, 0.5) {root};
+    \draw (0, 0) to node[midway,sloped,above] {0} (-1, -1);
+    \draw (0, 0) to node[midway,sloped,above] {1} (1, -1);
+    \draw[fill=red] (1,-1) circle (1mm); \node[color=red] at (1.5, -1) {A};
+    \draw[fill=black] (-1,-1) circle (0.5mm);
+    \draw (-1, -1) to node[midway,sloped,above] {0} (-2, -2);
+    \draw (-1, -1) to node[midway,sloped,above] {1} (0, -2);
+    \draw[fill=red] (0,-2) circle (1mm); \node[color=red] at (0.5, -2) {B};
+    \draw[fill=black] (-2,-2) circle (0.5mm);
+    \draw (-2, -2) to node[midway,sloped,above] {0} (-3, -3);
+    \draw (-2, -2) to node[midway,sloped,above] {1} (-1, -3);
+    \draw[fill=red] (-3,-3) circle (1mm); \node[color=red] at (-2.5, -3) {Z};
+    \draw[fill=red] (-1,-3) circle (1mm); \node[color=red] at (-0.5, -3) {C};
+\end{tikzpicture}
+</script>
+<br/>
+<em>Fig. 2: Huffman coding table, prefix tree version.</em>
+
+</center>
+<br/>
+
+With this tree in mind, encoding simply means writing down the path from the root to the symbol you're reading. And decoding simply means reading a path and following it to a leaf. This is simple, elegant, and easy to understand.
+
+# Huffman decoding, same, but different
+
+So we're not gonna do that.
+
+#### Why?
+
+Here's why: that prefix tree is going to be a recursive data structure, with fields pointing to either a leaf or a subtree. The key word here is _pointing_: we'd be on the heap, referencing allocated nodes.
+
+Don't get me wrong, it is absolutely fine and safe. But it's not efficient. The tree above requires 7 nodes, 4 of which are leaves holding a `u8` symbol, the 3 others holding two pointers (presumably a `Box<&Tree>`) of size `usize` each. On a typical 64-bit machine this means allocating a minimum of 52 bytes that are fragmented all over the place; and getting to `C`costs a minimum of 3 pointer resolutions. That's _a lot_ of overhead and indirection for such a small table.
+
+#### Reverse hash map?
+
+Another approach that I've seend used is to store a "reverse" hash map, that has codewords as keys and symbols as values. One would read a bit, check whether the hash map contains this word, and if not consume the next bit, etc.
+
+Even when partitioning the hashmap per length, this is wildly inefficient, as every _attempt_ causes a lookup in the table, which is one hash computation per bit.
+
+#### Repurposing tANS/FSE tables
+
+Here's the idea that we're going to use. Let `max_bits` be the bitlength of our largest codeword (3, in the example above). We can prepare a table with the following information
+
+    000 -> { symbol: Z, nb_bits: 3}
+    001 -> { symbol: C, nb_bits: 3}
+    010 -> { symbol: B, nb_bits: 2}
+    011 -> { symbol: B, nb_bits: 2}
+    100 -> { symbol: A, nb_bits: 1}
+    ...
+    111 -> { symbol: A, nb_bits: 1}
+
+The idea here is that if we read for instance three bits and get `111`, our table tells us that this is a `A` symbol, and we only need to consume 1 bit.
+
+Does this remind you of anything? **This is how tANS/FSE tables work!** With symbols appearing as often as their weight!
+
+The total table has 8 entries, each with a `u8` symbol and a `u8` number of bits, so that's 128 bytes of memory usage **but** in contiguous memory. There is no indirection, a single allocation for the whole table, no hash computation. If `max_bits` was known in advance, we could even implement all of this over stack memory only. And it's nice to have a "common approach" to solving both tANS/FSE and Huffman decoding.
+
+# Constructing the Huffman table
+
+To build our decoding table we need the (normalised) Huffman weights for each symbol (see [Part VI]({% post_url 2021-10-04-entropy6 %}) for details), as well as `max_bits`.
+
+Say we have 6 symbols $$(A, B, C, D, E, F)$$, with respective weights $$(4, 3, 2, 0, 1, 1)$$. What codewords do we get?
+
+- The value of `max_bits` is 4 here
+- The zero-weight symbols do not get a code
+- Lowest-weight symbols get the longest codes: $$E \to 0000$$, $$F \to 0001$$
+- Then $$C \to 001$$ (cannot be $$000$$ as it is prefix to the above codewords)
+- Then $$B \to 01$$ (cannot be $$00$$)
+- Then $$A \to 1$$ (cannot be $$0$$)
+
+Weight-1 symbols occupy 1 entry in the table each, weight-2 symbols are duplicated twice, and generally speaking weight $$w$$ symbols are allocated $$2^{w-1}$$ consecutive entries.
+
+> Unlike tANS/FSE tables, we don't need to spread entries in the table (see [Part IV]({% post_url 2021-09-24-entropy4 %})). The reason is that Huffman decoding is stateless, so the distance between states doesn't matter.
+
+Let's try a Python script for this:
+
+```python
+# File: huff3.py
+
+def build_huff_table(symbols, weights, max_bits):
+    table_size = 1 << max_bits
+    table = [(0, 0)] * table_size
+
+    pairs = zip(weights, symbols)
+    pairs.sort()
+
+    current_pos = 0
+
+    for weight, symbol in pairs:
+        if weight == 0:
+            continue
+
+        code_len = max_bits + 1 - weight
+        copies = 1 << (weight - 1)
+
+        for i in range(copies):
+            table[current_pos + i] = (symbol, code_len)
+        current_pos += copies
+
+    return table
+
+
+symbols = "ABCDEF"
+weights = [4, 3, 2, 0, 1, 1]
+max_bits = 4
+
+table = build_huff_table(symbols, weights, max_bits)
+
+# Pretty printing
+fstr = '{0:0%sb}' % max_bits
+for i in range(1 << max_bits):
+    print("%s -> %s" % (fstr.format(i), table[i]))
+```
+
+Did you notice something very nice? **We never had to explicitly compute any codeword.** They are "built in" the table.
+
+Decoding is relatively easy too:
+
+```python
+# File: huff3.py
+
+# ...
+
+def table_decoder(table, max_bits,  bitstream):
+    padding = ''
+    if len(bitstream) == 0:
+        return ''
+    elif len(bitstream) < max_bits:
+        # If necessary, pad with zeros
+        padding = "0" * (max_bits - len(bitstream))
+
+    # Read max_bits from input, convert to integer
+    read = bitstream[:max_bits] + padding
+    read = int(read, 2)
+
+    # Get corresponding entry
+    symbol, nb_bits = table[read]
+
+    # Consume nb_bits
+    bitstream = bitstream[nb_bits:]
+
+    # Output symbol and proceed
+    return symbol + table_decoder(table, max_bits, bitstream)
+
+received = "011010000"
+print(table_decoder(table, max_bits, received))
+# Prints: "BABE'
+```
+
+Technical point: Zstandard stores the bitstream differently than above:
+
+- in reverse,
+- as bytes
+- with an initial `1` on the last byte (which isn't part of the Huffman stream)
+  Take `BECCA` for instance, we get successively:
+- `1100100000010` (encoded, but in reverse)
+- `1100 1000`, `0001 0` (cut as bytes)
+- `11001000 00010100` (with padding bit)
+
+Let's fix our Python decoder:
+
+```python
+# File: huff3.py
+
+# ...
+
+def table_decoder(table, max_bits,  bitstream):
+    padding = ''
+    if len(bitstream) == 0:
+        return ''
+    elif len(bitstream) < max_bits:
+        # If necessary, pad with zeros
+        padding = "0" * (max_bits - len(bitstream))
+
+    # Read max_bits from input, convert to integer
+    # New: now reversed and reading from the end
+    read = bitstream[-max_bits:][::-1] + padding
+    read = int(read, 2)
+
+    # Get corresponding entry
+    symbol, nb_bits = table[read]
+
+    # Consume nb_bits
+    # New: now trimming from the end
+    bitstream = bitstream[:-nb_bits]
+
+    # Output symbol and proceed
+    return symbol + table_decoder(table, max_bits, bitstream)
+
+
+def trim_initial_bit(bitstream):
+    while bitstream[-1] != '1':
+        bitstream = bitstream[:-1]
+    bitstream = bitstream[:-1]
+    return bitstream
+
+received = "1100100000010100"
+decoded = table_decoder(table, max_bits, trim_initial_bit(received))
+print(decoded)
+# Prints: "BECCA"
+```
+
+# Reading the spec, again
+
+Take the simpler `ABFE` as an example, per our above discussions it should be coded as `0000100010110000` (padding bit and extra zeros included).
+
+In the Zstandard spec, it says we should get `0001000000001101`.
+
+The first thing to notice is that **the spec is wrong**. Not kidding, it is factually contradicting itself, using an incorrect codeword for two symbols. Luckily, the mistake is easy to spot and fix because the correct codeword is given a couple lines above.
+
+Let's also split things for more clarity: the expected bitstream (once the spec error fixed) is `0000 0001 000001 1 01`. Yeah, for some reason, the padding bit ends _somewhere in the middle_. See something else?
+
+The second thing to notice is that **the spec is wrong**, again. We're not at all reading the bistream in reverse! If anything the codewords are in _forward_ order.
+
+The spec lets us believe that we should have "padding D C B A", but what it _really means_ is we should expect "C D padding A B". What's going on? **The stream is not "reversed" bit per bit, but byte per byte**. (Not only is that not mentioned anywhere, it is inconsistent with the way the tANS/FSE bitstream is represented...)
+
+So, we should:
+
+- write the codes for "ABFE" _in that order_: `1 01 0001 0000`, then
+- starting from the end, pop one byte into the output: `0001 0000`
+- (repeat until last byte)
+- when we pop the last byte `10 1`, which is less than 8 bits, prepend the padding: `00001 10 1`. (If the last byte is exactly 8 bits, prepend a `0x1` byte)
+
+Again, this is not made explicit in any way, anywhere.
+
+How do we decode that mess? Here's one suggestion:
+
+- Reverse the _bytes_ from the stream (leaving the bits in order)
+- Trim the stream just after the first `1`
+- Read the stream _in forward order_ as the Huffman bitstream.
+
+I guess we can revert the changes we made to our Python code, and write something to reverse bytes
+
+```python
+# File: huff3.py
+
+# ...
+
+def table_decoder(table, max_bits,  bitstream):
+    # ... Back to the first version!
+
+# New!
+def reverse_bytes(bitstream):
+    bytes = [bitstream[x:x+8] for x in range(0, len(bitstream), 8)]
+    return ''.join(reversed(bytes))
+
+# New !
+def trim_final_bit(bitstream):
+    while bitstream[0] != '1':
+        bitstream = bitstream[1:]
+    bitstream = bitstream[1:]
+    return bitstream
+
+received = "0001000000001101"
+
+decoded = table_decoder(
+    table,
+    max_bits,
+    trim_final_bit(reverse_bytes(received))
+)
+print(decoded)
+# Prints: "ABFE"
+```
+
+Phew!
+
+> Why are Huffman streams in Zstandard _so different_ from FSE streams, when the decoding logic is so similar? I suspect that this is because the Zstandard reference implementation re-uses a pre-existing high-performance Huffman decoder called ̀`huff0`. This coder probably had its own convention for working with data streams and it wasn't worth changing it to match tANS/FSE stream conventions. Why does the spec lie about this? I don't know. Do you?
+
+# Testing it
+
+Ooookay. So. Assuming our weight-reading is correct. And that our table building algorithm gives the same codes as the spec expects. We just have to do the above shuffling and trimming procedure, and we'd get our treasured literals. Can we try that?
+
+Let's put the table we got last time
+
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+     0, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0,
+     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 0, 2, 0, 0, 0, 2, 0, 0,
+     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+     0, 4, 2, 3, 2, 4, 2, 3, 4, 3, 2, 0, 3, 1, 3, 5, 1, 0, 4, 4, 3, 1, 1, 3,
+     0, 3]
+
+together with the stream extracted for the literals sections
+
+    [194, 160, 135, 231, 56, 76, 31, 133, 6, 7, 228, 210, 67, 183, 148, 158, 88, 239, 178, 129, 75, 227, 118, 131, 221, 184, 232, 33, 91, 63, 98, 117, 104, 79, 5, 133, 91, 174, 113, 159, 203, 168, 68]
+
+Our Python code extracts from this
+
+    Are those shy Eurasian footwear, cowboy chaps, or jolly earthmoving headgear?
+
+**VICTORY!**
+
+(As it turns out, there is no sequence in this particular file, everything is contained in the literals section).
+
+# RIIR
+
+In [Part III]({% post_url 2021-09-22-entropy3 %}) we had written a Huffman decoder. **We are now going to throw it all away**, and replace it by our table-oriented approach. No sad feelings. **NO. FEELINGS.**
+
+So let's erase `huffman.rs` and start from scratch, because who doesn't love a clean plate.
+
+```rust
+// File: zrs/zarc/src/huffman.rs
+// Replaces everything we had before
+
+use bitvec::prelude::*;
+
+#[derive(Copy, Clone, Debug)]
+struct HuffmanItem {
+    symbol: u8,
+    nb_bits: u8,
+}
+
+#[derive(Debug)]
+pub struct HuffmanCodec {
+    table: Vec<HuffmanItem>,
+    max_bits: u8,
+}
+
+impl HuffmanCodec {
+    pub fn from_weights(weights: &[u8], max_bits: u8) -> Self {
+        let mut pairs: Vec<_> = weights
+            .iter()
+            .enumerate()
+            .map(|(symbol, &weight)| (weight, symbol as u8))
+            .collect();
+
+        pairs.sort();
+
+        let mut table = vec![];
+
+        for (weight, symbol) in pairs {
+            if weight == 0 {
+                continue;
+            }
+            let nb_bits = max_bits + 1 - weight;
+            let copies = 1 << (weight - 1);
+
+            for _ in 0..copies {
+                table.push(HuffmanItem { symbol, nb_bits });
+            }
+        }
+        Self { table, max_bits }
+    }
+
+    pub fn decompress(&self, input: &[u8]) -> Vec<u8> {
+        if input.is_empty() {
+            return vec![];
+        }
+
+        // Reverse bytes
+        let mut reversed_bytes = input.to_vec();
+        reversed_bytes.reverse();
+
+        // Trim padding
+        let mut bitstream = reversed_bytes.view_bits::<Msb0>();
+        while !bitstream[0] {
+            bitstream = &bitstream[1..];
+        }
+        bitstream = &bitstream[1..];
+
+        let mut result = vec![];
+        while !bitstream.is_empty() {
+            // How many bits we can read
+            let available = std::cmp::min(self.max_bits as usize, bitstream.len());
+
+            // Read max bits from the input
+            let read = &bitstream[..available];
+            let read = bits_to_integer_msb(read);
+
+            // Get corresponding entry in table
+            let entry = self.table[read];
+
+            if (entry.nb_bits as usize) < bitstream.len() {
+                // Output symbol
+                result.push(entry.symbol);
+                // Consume nb_bits
+                bitstream = &bitstream[entry.nb_bits as usize..];
+            } else {
+                break;
+            }
+        }
+        result
+    }
+
+    pub fn compress(&self, symbols: &[u8]) -> Vec<u8> {
+        unimplemented!("Huffman coding not implemented")
+    }
+}
+
+pub fn bits_to_integer_msb(bits: &BitSlice<Msb0, u8>) -> usize {
+    let mut result = 0;
+    for i in 0..bits.len() {
+        let bit = bits[i];
+        if bit {
+            result |= 1;
+        }
+        result <<= 1;
+    }
+    result >>= 1;
+    result
+}
+```
+
+Hopefully, everything above is clear from our previous discussion. Except perhaps this `Msb0` which is probably just a _kludge_ I threw in to make things work in the right direction.
+
+Testing with the same weights and stream as our Python script, we get the same output. **Success!**
+
+# Plumbing, or the Art of Software Development
+
+We have the building blocks for our Zstandard decompresser ready. We probably cut corners at some places and may not handle all the edge cases properly just yet, but we should be able to digest the bulk of any file now.
+
+Here are the results of doing so on our example file: we recover the original text _almost_ exactly: a final `\n` is missing somehow. Maybe that's nothing. But running our code on the slightly longer
+
+    Are those things shy Eurasian footwear, cowboy chaps, or jolly earthmoving headgear?
+
+results in the (incorrect) literal list
+
+    a\nejmmlAre thosings shy Eurasian footwear, cowboy chaps, or jolly earthmoving headgear?
+
+Its heart is in the right place, but that's not acceptable. I pin this down to the splitting of blocks into headers/literals/sequences not being _exactly right_.
+
+> On a fun note: Huffman decoding cannot fail, it will always produce _some_ output, even when fed random bits. The first few characters in the above literals list are just that: garbage that the Huffman decoder spits out when fed with garbage.
+
+# This is a good place to stop
+
+**What did we learn today?**
+
+- Efficient Huffman decoding can be achieved without ever explicitly building a tree, reusing a strategy similar to tANS/FSE decoding
+- We seem to appropriately read the tANS/FSE stream for Huffman weights
+- We seem to get the correct Huffman weights
+- We seem to build the correct Huffman codes from these weights
+- With the appropriate input, our Huffman decoder outputs the expected literals
+- The spec for Zstandard seems to have at least typos and poor wording, but we can navigate past them with some thinking and experimental tinkering
+  That's a lot of good news!
+
+In the process, we also got rid of the `huffman-compress` dependency, which we can now remove from our `Cargo.toml` along with its own (confusing) dependency on `bit-vec` (our lib only depends on `bitvec` and ̀`twox-hash` for now).
+
+We also learned that our `process_compressed_block` function likely gets the offsets wrong when splitting into headers/literals/sequence bitstream. So that's obviously the next step in our journey. Or adventure. Or quest. **_Stay tuned!_**
+
+_Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
+
+[coffee]: https://www.buymeacoffee.com/shargs

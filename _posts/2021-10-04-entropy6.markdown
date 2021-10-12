@@ -17,8 +17,9 @@ This post is part of a series on entropy coding and writing our own Zstandard li
 [II]({% post_url 2021-09-19-entropy2 %}) ·
 [III]({% post_url 2021-09-22-entropy3 %}) ·
 [IV]({% post_url 2021-09-24-entropy4 %}) ·
-[V]({% post_url 2021-09-28-entropy5 %})
-[VI]({% post_url 2021-10-04-entropy6 %})
+[V]({% post_url 2021-09-28-entropy5 %}) ·
+[VI]({% post_url 2021-10-04-entropy6 %}) ·
+[VII]({% post_url 2021-10-11-entropy7 %})
 
 Welcome back to the series. In the last episode, we figured out how to extract tANS/FSE encoded streams, and could successfully decompress files. Two limitations were that we only supported predefined distributions, and raw-encoded literals.
 
@@ -362,7 +363,7 @@ Why? Simply because we don't need to store it: we can deduce it from other weigh
 - Find the smallest power of 2 larger than $$s$$, call it $$2^k$$
 - Then the last weight is $$2^k - s$$.
 
-With our table above, we find $$s = 124$$, so $$p = 128 = 2^7$$, and `y` has weight $$128-124 = 4$$. (As a sanity check, `y` and `t` both appear 3 times in the text, and have the same weight, so we're at least in the right ballpark.)
+With our table above, we find $$s = 124$$, so $$p = 128 = 2^7$$, and `y` has weight $$w$$ such that $$128-124 = 2^{w-1}$$. So $$w = 3$$.
 
 ```rust
 // File: zrs/zarc/src/decompress.rs
@@ -388,7 +389,15 @@ fn extract_huffman_table(input: &[u8]) -> (usize, huffman::HuffmanTable) {
             }
             p = p << 1;
         }
-        huffman_weights.push((p - s) as u8);
+
+        let mut w = 1;
+        for _ in 0..63 {
+            if 1 << (w - 1) >= p - s {
+                break;
+            }
+            w += 1;
+        }
+        huffman_weights.push(w as u8);
     }
 
     // Build Huffman table from weights
@@ -405,10 +414,9 @@ And with **that**, we seem to have almost all we need to decode Huffman-coded li
 
 This post took much longer to write, and rewrite, than it seems. Figuring out the _exact_ offsets and bit positions to read from what mindbendingly difficult from the spec, and took many back and forths to get right.
 
-The prize we get is our decompressor will be able to support custom tANS/FSE tables everywhere we could need them, and we are mostly done with Huffman coding. So if all goes according to _keikaku_ in the next post we put these things together and we should support at least a majority honest-to-goodness `zstd` compressed files. Of course, we may still have obstacles ahead, but they won't be theoretical. Or will they? We'll see. **_Stay tuned!_**
+The prize we get is our decompressor will be able to support custom tANS/FSE tables everywhere we could need them, and we are mostly done with Huffman coding. So if all goes according to _keikaku_ in the next post we put these things together and we should support at least a majority honest-to-goodness `zstd` compressed files. Of course, we may still have obstacles ahead, but they won't be theoretical. Or will they? We'll see. Go to [Part VII]({% post_url 2021-10-11-entropy7 %})!
 
 _Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
 
 [rygpaper]: https://arxiv.org/abs/1402.3392
-[wpcanhuf]: https://en.wikipedia.org/wiki/Canonical_Huffman_code
 [coffee]: https://www.buymeacoffee.com/shargs
