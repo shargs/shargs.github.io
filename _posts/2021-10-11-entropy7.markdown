@@ -392,9 +392,7 @@ impl HuffmanCodec {
             let nb_bits = max_bits + 1 - weight;
             let copies = 1 << (weight - 1);
 
-            for _ in 0..copies {
-                table.push(HuffmanItem { symbol, nb_bits });
-            }
+            table.extend(vec![HuffmanItem { symbol, nb_bits }; copies]);
         }
         Self { table, max_bits }
     }
