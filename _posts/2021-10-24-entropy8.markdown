@@ -47,7 +47,7 @@ Here are the things that we don't yet support:
 
 Amongst the above points, we'll address **1, 4, 5, 6** today.
 
-Addressing (1) requires a way to reuse a table across blocks, we'll think about how to do that at a later time, and addressing (2) is not a priority as I struggled to find _any_ compressed file that has this, I'm not even sure it's actually ever used.
+Addressing (2) requires a way to reuse a table across blocks, we'll think about how to do that at a later time, and addressing (3) is not a priority as I struggled to find _any_ compressed file that has this, I'm not even sure it's actually ever used.
 
 # Splitting blocks
 
