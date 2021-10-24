@@ -45,7 +45,7 @@ Here are the things that we don't yet support:
 
 (There are other nice things we can do, and some optimisations, but if we handled all of the above we would have a fully-functioning Zstandard decoder.)
 
-Amongst the above points, we'll address **0, 3, 4, 5** today.
+Amongst the above points, we'll address **1, 4, 5, 6** today.
 
 Addressing (1) requires a way to reuse a table across blocks, we'll think about how to do that at a later time, and addressing (2) is not a priority as I struggled to find _any_ compressed file that has this, I'm not even sure it's actually ever used.
 
