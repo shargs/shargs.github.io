@@ -20,7 +20,8 @@ This post is part of a series on entropy coding and writing our own Zstandard li
 [V]({% post_url 2021-09-28-entropy5 %}) ·
 [VI]({% post_url 2021-10-04-entropy6 %}) ·
 [VII]({% post_url 2021-10-11-entropy7 %}) ·
-[VIII]({% post_url 2021-10-24-entropy8 %})
+[VIII]({% post_url 2021-10-24-entropy8 %}) ·
+[IX]({% post_url 2022-07-28-entropy9 %})
 
 Welcome back to the series. In the previous episodes, we set up some boilerplate to get data in and out of `zst` archives, compute and verify checksums, and handle common errors.
 

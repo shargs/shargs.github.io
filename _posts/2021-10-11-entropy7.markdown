@@ -20,7 +20,8 @@ This post is part of a series on entropy coding and writing our own Zstandard li
 [V]({% post_url 2021-09-28-entropy5 %}) ·
 [VI]({% post_url 2021-10-04-entropy6 %}) ·
 [VII]({% post_url 2021-10-11-entropy7 %}) ·
-[VIII]({% post_url 2021-10-24-entropy8 %})
+[VIII]({% post_url 2021-10-24-entropy8 %}) ·
+[IX]({% post_url 2022-07-28-entropy9 %})
 
 Welcome back to the series, a neverending succession of highs and lows. In the last episode, we implemented the necessary logic to extract tANS/FSE tables from a file, which we used to decompress Huffman weights (using two interleaved decoders, _how fun_).
 Today, we'll stare some more at Huffman coding --- and especially *de*coding --- in the context of Zstandard. This will be a "high".
@@ -486,7 +487,8 @@ Its heart is in the right place, but that's not acceptable. I pin this down to t
 
 In the process, we also got rid of the `huffman-compress` dependency, which we can now remove from our `Cargo.toml` along with its own (confusing) dependency on `bit-vec` (our lib only depends on `bitvec` and ̀`twox-hash` for now).
 
-We also learned that our `process_compressed_block` function likely gets the offsets wrong when splitting into headers/literals/sequence bitstream. So that's obviously the next step in our journey. Or adventure. Or quest. **_Stay tuned!_**
+We also learned that our `process_compressed_block` function likely gets the offsets wrong when splitting into headers/literals/sequence bitstream. So that's obviously the next step in our journey. Or adventure. Or quest. 
+Go to [Part VIII]({% post_url 2021-10-24-entropy8 %})!
 
 _Did you like this? Do you want to support this kind of stuff? Please share around. You can also [buy me a coffee][coffee]._
 

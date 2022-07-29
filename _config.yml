@@ -29,6 +29,16 @@ url: "https://shargs.github.io" # the base hostname & protocol for your site, e.
 github_username: shargs
 logo: android-chrome-512x512.png
 
+lsi: false
+safe: true
+incremental: false
+highlighter: rouge
+gist:
+  noscript: false
+kramdown:
+  math_engine: mathjax
+  syntax_highlighter: rouge
+
 # Build settings
 theme: minima
 plugins:
