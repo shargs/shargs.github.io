@@ -21,7 +21,8 @@ This post is part of a series on entropy coding and writing our own Zstandard li
 [VI]({% post_url 2021-10-04-entropy6 %}) ·
 [VII]({% post_url 2021-10-11-entropy7 %}) ·
 [VIII]({% post_url 2021-10-24-entropy8 %}) ·
-[IX]({% post_url 2022-07-28-entropy9 %})
+[IX]({% post_url 2022-07-28-entropy9 %}) ·
+[X]({% post_url 2022-09-10-entropy10 %})
 
 Welcome back to the series, a neverending succession of highs and lows. In the last episode, we implemented the necessary logic to extract tANS/FSE tables from a file, which we used to decompress Huffman weights (using two interleaved decoders, _how fun_).
 Today, we'll stare some more at Huffman coding --- and especially *de*coding --- in the context of Zstandard. This will be a "high".
