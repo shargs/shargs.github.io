@@ -27,7 +27,7 @@ This post is part of a series on entropy coding and writing our own Zstandard li
 
 We need to lay some groundwork to tackle compression. Our concern is that decompression is _well-defined_, meaning that from a (valid) input you can only reasonably provide one output. Indeed we have a checksum for that.
 
-Compression, however, is not so: you may compress a file in many different ways, which will all decompress correctly. As you may remember, each block may be stored uncompressed, or compressed using RLE, of using tANS/FSE, with or without explicit frequency tables, which themselves are to an extend free to choose. **The compressor has to make the right calls**, decide which is best for each block, according to some metric. 
+Compression, however, is not so: you may compress a file in many different ways, which will all decompress correctly. As you may remember, each block may be stored uncompressed, or compressed using RLE, of using tANS/FSE, with or without explicit frequency tables, which themselves are to an extent free to choose. **The compressor has to make the right calls**, decide which is best for each block, according to some metric. 
 
 > In general, the relevant metric is compressed size: we want the compressed file to be as short as possible. But we could come up with other metrics: faster compression (less work for the compressor), faster decompression (less work for the decompressor), compatibility with such or such implementation (e.g., refrain from using some compression type), etc.
 
@@ -53,6 +53,8 @@ Oh, did I mention that it's up to the compressor to decide how large blocks are?
 <br/>
 
 Compressors typically try to answer these questions by a combination of heuristics and optimization techniques. This is what we discuss here.
+
+> Small disclaimer: exceptionally, there isn't any Rust in this post. Sorry about that. 
 
 # Block splitting and the case of RLE
 
